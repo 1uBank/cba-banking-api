@@ -3,9 +3,9 @@ package com.oneutility.cba.bankingapi.clients;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.oneutility.cba.bankingapi.IntegrationTest;
-import com.oneutility.cba.bankingapi.clients.application.ApiClientService;
+import com.oneutility.cba.bankingapi.clients.service.ApiClientService;
 import com.oneutility.cba.bankingapi.clients.domain.ApiClient;
-import com.oneutility.cba.bankingapi.clients.infrastructure.ApiClientRepository;
+import com.oneutility.cba.bankingapi.clients.domain.ApiClientRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.CacheManager;

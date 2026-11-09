@@ -13,12 +13,12 @@ import com.atlassian.oai.validator.OpenApiInteractionValidator;
 import com.atlassian.oai.validator.report.LevelResolver;
 import com.atlassian.oai.validator.report.ValidationReport;
 import com.oneutility.cba.bankingapi.IntegrationTest;
-import com.oneutility.cba.bankingapi.auth.application.AuthServiceTokenGateway;
-import com.oneutility.cba.bankingapi.auth.application.ClientCredentials;
-import com.oneutility.cba.bankingapi.auth.application.IssuedToken;
-import com.oneutility.cba.bankingapi.auth.application.TokenRequestException;
+import com.oneutility.cba.bankingapi.auth.dto.ClientCredentials;
+import com.oneutility.cba.bankingapi.auth.dto.IssuedToken;
+import com.oneutility.cba.bankingapi.auth.service.AuthServiceClient;
+import com.oneutility.cba.bankingapi.auth.service.TokenRequestException;
 import com.oneutility.cba.bankingapi.clients.domain.ApiClient;
-import com.oneutility.cba.bankingapi.clients.infrastructure.ApiClientRepository;
+import com.oneutility.cba.bankingapi.clients.domain.ApiClientRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -45,7 +45,7 @@ class TokenEndpointIT {
     private ApiClientRepository clients;
 
     @MockitoBean
-    private AuthServiceTokenGateway authService;
+    private AuthServiceClient authService;
 
     @Test
     void issuesATokenToAnActiveClient() throws Exception {

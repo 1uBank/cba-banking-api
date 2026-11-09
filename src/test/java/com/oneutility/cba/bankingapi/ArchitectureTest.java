@@ -13,52 +13,62 @@ import com.tngtech.archunit.lang.ArchRule;
 import com.tngtech.archunit.lang.ConditionEvents;
 import com.tngtech.archunit.lang.SimpleConditionEvent;
 
-/** The module rules from the Engineering Standards (Code structure, Layout). */
+/**
+ * The structure rules (see the README, Layout): a module is {@code controller -> service -> domain}, with {@code dto}
+ * for the objects passed between them, and modules reach each other only through their services.
+ */
 @AnalyzeClasses(packages = "com.oneutility.cba.bankingapi", importOptions = ImportOption.DoNotIncludeTests.class)
 class ArchitectureTest {
 
     private static final String ROOT = "com.oneutility.cba.bankingapi.";
 
     @ArchTest
-    static final ArchRule modules_use_each_other_only_through_application =
-            classes().that().resideInAPackage(ROOT + "(*)..").and().resideOutsideOfPackage(ROOT + "shared..")
-                    .should(onlyReachOtherModulesThroughApplication());
+    static final ArchRule modules_use_each_other_only_through_services_and_dtos =
+            classes().that().resideInAPackage(ROOT + "(*)..").and().resideOutsideOfPackage(ROOT + "common..")
+                    .should(onlyReachOtherModulesThroughServicesAndDtos());
 
     @ArchTest
-    static final ArchRule shared_depends_on_no_module = noClasses().that().resideInAPackage(ROOT + "shared..")
-            .should().dependOnClassesThat().resideOutsideOfPackages(ROOT + "shared..", "java..", "jakarta..",
+    static final ArchRule common_depends_on_no_module = noClasses().that().resideInAPackage(ROOT + "common..")
+            .should().dependOnClassesThat().resideOutsideOfPackages(ROOT + "common..", "java..", "jakarta..",
                     "org.springframework..", "org.slf4j..", "com.fasterxml..");
 
     @ArchTest
-    static final ArchRule domain_depends_on_no_other_layer = noClasses().that().resideInAPackage("..domain..")
-            .should().dependOnClassesThat().resideInAnyPackage("..api..", "..application..", "..infrastructure..");
+    static final ArchRule controllers_do_not_use_the_domain = noClasses().that().resideInAPackage("..controller..")
+            .should().dependOnClassesThat().resideInAPackage(ROOT + "*.domain..");
 
     @ArchTest
-    static final ArchRule application_does_not_depend_on_api = noClasses().that()
-            .resideInAPackage("..application..").should().dependOnClassesThat().resideInAPackage("..api..");
+    static final ArchRule services_do_not_use_controllers = noClasses().that().resideInAPackage("..service..")
+            .should().dependOnClassesThat().resideInAPackage("..controller..");
+
+    @ArchTest
+    static final ArchRule domain_depends_on_no_other_layer = noClasses().that().resideInAPackage(ROOT + "*.domain..")
+            .should().dependOnClassesThat().resideInAnyPackage("..controller..", "..service..", "..dto..");
+
+    @ArchTest
+    static final ArchRule dtos_depend_on_no_other_layer = noClasses().that().resideInAPackage("..dto..")
+            .should().dependOnClassesThat().resideInAnyPackage("..controller..", "..service..", ROOT + "*.domain..");
 
     @ArchTest
     static final ArchRule modules_have_no_cycles = slices().matching(ROOT + "(*)..").should().beFreeOfCycles();
 
     @ArchTest
-    static final ArchRule transactions_only_in_application = noClasses().that()
-            .resideOutsideOfPackage("..application..")
+    static final ArchRule transactions_only_in_services = noClasses().that().resideOutsideOfPackage("..service..")
             .should().beAnnotatedWith("org.springframework.transaction.annotation.Transactional");
 
-    private static ArchCondition<JavaClass> onlyReachOtherModulesThroughApplication() {
-        return new ArchCondition<>("use other modules only through their application package") {
+    private static ArchCondition<JavaClass> onlyReachOtherModulesThroughServicesAndDtos() {
+        return new ArchCondition<>("use other modules only through their service and dto packages") {
             @Override
             public void check(JavaClass origin, ConditionEvents events) {
                 String module = module(origin.getPackageName());
                 origin.getDirectDependenciesFromSelf().forEach(dependency -> {
-                    JavaClass target = dependency.getTargetClass();
-                    String targetPackage = target.getPackageName();
+                    String targetPackage = dependency.getTargetClass().getPackageName();
                     if (!targetPackage.startsWith(ROOT)) {
                         return;
                     }
                     String targetModule = module(targetPackage);
-                    if (targetModule.equals(module) || targetModule.equals("shared")
-                            || targetPackage.startsWith(ROOT + targetModule + ".application")) {
+                    if (targetModule.equals(module) || targetModule.equals("common")
+                            || targetPackage.startsWith(ROOT + targetModule + ".service")
+                            || targetPackage.startsWith(ROOT + targetModule + ".dto")) {
                         return;
                     }
                     events.add(SimpleConditionEvent.violated(dependency, dependency.getDescription()));

@@ -17,31 +17,33 @@ A modular monolith: one deployable, one top-level package per business module un
 | `clients` | The registry of client applications (`api_client`) and whether each is active |
 | `customers`, `accounts`, `virtualaccounts`, `invoices`, `transfers`, `holds`, `debits`, `transactions`, `referencedata` | The API areas, one per tag in the contract |
 | `events` | The event table (outbox) and publishing to SNS |
-| `corebanking` | The client for CBA-CORE; other modules use it through its `application` package |
-| `shared` | Cross-cutting code: error format, correlation IDs, security. Depends on no module |
+| `corebanking` | The client for CBA-CORE; other modules call it through its services |
+| `common` | What every module shares: `exception` (error codes, `ApiException`, the error format), `security`, `web` (correlation IDs). Depends on no module |
 
 Inside a module:
 
-| Layer | Holds |
+| Package | Holds |
 |---|---|
-| `api` | Controllers and request/response records |
-| `application` | Use cases (`@Transactional` lives here only) and the interfaces the module needs from outside |
-| `domain` | Entities and rules |
-| `infrastructure` | Repositories, HTTP clients, messaging |
+| `controller` | REST controllers: read the request, call one service method, return the response |
+| `service` | The logic: rules, `@Transactional`, and clients for other systems (for example `AuthServiceClient`) |
+| `domain` | JPA entities and their repositories |
+| `dto` | Request and response records, and other objects passed between layers |
 
-`ArchitectureTest` fails the build when a module reaches into another module other than through its `application`
-package, when `shared` depends on a module, when `domain` depends on another layer, or when modules form a cycle.
+A request goes `controller -> service -> domain`. Controllers never use repositories; services never use
+controllers. A module uses another module only through that module's `service` and `dto` packages, never its
+`domain`. `ArchitectureTest` fails the build when any of this is broken, or when modules depend on each other in a
+cycle.
 
 ## Adding an endpoint
 
-1. Agree the change in `api/banking-api.yaml` first, then rebuild the docs (below).
-2. Write the controller in the module's `api` package. Guard it with the scope from the contract:
-   `@PreAuthorize("hasAuthority('SCOPE_transfers')")`.
-3. Get the calling client with `CurrentClient.id()` and check ownership in the `application` layer.
+1. Agree the change in `api/banking-api.yaml` first, then check it renders in the docs (below).
+2. Put the request and response records in the module's `dto` package, and the controller in `controller`. Guard
+   the endpoint with the scope from the contract: `@PreAuthorize("hasAuthority('SCOPE_transfers')")`.
+3. Put the logic in a class in `service`. Get the calling client with `CurrentClient.id()` and check ownership there.
 4. Refuse with `throw new ApiException(ErrorCode.ACCOUNT_NOT_FOUND, "...")`; the handler returns the contract's
    problem details. A new code goes into the contract's `Error.code` list and `ErrorCode` together.
-5. A database change is a new file in `src/main/resources/db/changelog/changes/`, added to the end of
-   `db.changelog-master.yaml`.
+5. Entities and repositories go in `domain`. A database change is a new file in
+   `src/main/resources/db/changelog/changes/`, added to the end of `db.changelog-master.yaml`.
 6. Test it: an `@IntegrationTest` (real PostgreSQL through Testcontainers, MockMvc) that checks responses against the
    contract with `openApi().isValid("api/banking-api.yaml")`, as `TokenEndpointIT` does.
 
