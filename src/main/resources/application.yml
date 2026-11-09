@@ -1,0 +1,73 @@
+# Environment values come from environment variables (secrets from the secrets manager).
+# Those without a default are required: the service does not start without them.
+spring:
+  application:
+    name: banking-api
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${BANKING_API_DB_URL}
+    username: ${BANKING_API_DB_USERNAME}
+    password: ${BANKING_API_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${BANKING_API_DB_POOL_SIZE:10}
+      connection-timeout: 5000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: banking_api
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    default-schema: banking_api
+  cache:
+    cache-names: activeClients
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=${BANKING_API_CLIENT_STATUS_CACHE:30s}
+  jackson:
+    default-property-inclusion: non_null
+    deserialization:
+      fail-on-unknown-properties: false
+
+server:
+  port: 8080
+  shutdown: graceful
+  error:
+    whitelabel:
+      enabled: false
+  forward-headers-strategy: framework
+
+management:
+  server:
+    port: 9001
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+  info:
+    env:
+      enabled: false
+
+logging:
+  structured:
+    format:
+      console: ${BANKING_API_LOG_FORMAT:ecs}
+
+banking-api:
+  auth-service:
+    token-url: ${BANKING_API_AUTH_TOKEN_URL}
+    jwk-set-uri: ${BANKING_API_AUTH_JWK_SET_URI}
+    issuer: ${BANKING_API_AUTH_ISSUER}
+    audience: banking-api
+    connect-timeout: 3s
+    read-timeout: 10s
+  problems:
+    type-base-uri: ${BANKING_API_PROBLEM_TYPE_BASE_URI:https://docs.cba.1ubank.example/problems/}

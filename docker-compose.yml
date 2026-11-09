@@ -1,0 +1,41 @@
+# Local run: the Banking API and its database. The auth service runs from cba-auth
+# (docker compose up there first); it is reached on the host's port 8180.
+services:
+  banking-api-db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: banking_api
+      POSTGRES_USER: banking_api
+      POSTGRES_PASSWORD: ${BANKING_API_DB_PASSWORD:?set it in .env}
+    volumes:
+      - ./src/test/resources/db/create-schema.sql:/docker-entrypoint-initdb.d/create-schema.sql:ro
+      - banking-api-db:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U banking_api -d banking_api"]
+      interval: 5s
+      retries: 10
+
+  banking-api:
+    build: .
+    depends_on:
+      banking-api-db:
+        condition: service_healthy
+    environment:
+      BANKING_API_DB_URL: jdbc:postgresql://banking-api-db:5432/banking_api
+      BANKING_API_DB_USERNAME: banking_api
+      BANKING_API_DB_PASSWORD: ${BANKING_API_DB_PASSWORD}
+      BANKING_API_AUTH_TOKEN_URL: http://host.docker.internal:8180/realms/clients/protocol/openid-connect/token
+      BANKING_API_AUTH_JWK_SET_URI: http://host.docker.internal:8180/realms/clients/protocol/openid-connect/certs
+      # The local auth service has no fixed hostname (KC_HOSTNAME), so tokens name it by the address this
+      # container calls it on. On AWS, KC_HOSTNAME is set and this is the auth service's public address.
+      BANKING_API_AUTH_ISSUER: http://host.docker.internal:8180/realms/clients
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8085:8080"
+      - "9105:9001"
+
+volumes:
+  banking-api-db:

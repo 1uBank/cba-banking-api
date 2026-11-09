@@ -1,0 +1,2953 @@
+openapi: 3.1.0
+info:
+  title: 1UBank Banking API
+  version: 1.0.0
+  summary: The only API client applications use to reach 1UBank's core banking.
+  description: |
+    The Banking API gives client applications access to 1UBank's core banking platform (CBA):
+    customers, accounts, virtual accounts, transfers, holds, service debits and transactions.
+
+    ## Terms
+
+    - **Client**: an application registered to call the API, for example the 1UBank App. Each
+      client has its own credentials, scopes, accounts and event queue.
+    - **Customer**: a 1UBank customer. A customer is identified by `clientId`, the core ledger's
+      customer ID.
+    - **Owned account**: an account opened by, or assigned to, the calling client.
+
+    ## Authentication
+
+    1. Obtain a token from `POST /v1/auth/token` with the client ID and secret (OAuth 2.0 client
+       credentials). Tokens last 15 minutes; request a new one on expiry.
+    2. Send it on every call: `Authorization: Bearer <access_token>`.
+
+    The client's scopes decide which calls it may make. Ownership decides which accounts it may
+    use: a client reads and moves money only on accounts it owns. Any other account returns `404`,
+    so the API never confirms that an account exists.
+
+    ## Transaction reference
+
+    Every call that moves money carries the client's own `transactionReference`. It is required, up to 50
+    characters (letters, digits, `-` and `_`), and must be unique across all clients, for good.
+
+    - The same reference with the same body returns the original result. Nothing is posted twice,
+      so retrying a call that timed out is always safe.
+    - The same reference with a different body returns `409 REFERENCE_REUSED`.
+    - The same reference while the first request is still running returns `409 REQUEST_IN_PROGRESS`;
+      retry a little later.
+    - Look a transfer up at any time with `GET /v1/transfers/{transactionReference}`.
+
+    ## Conventions
+
+    - JSON fields are camelCase, except on the token endpoint, whose names OAuth 2.0 fixes
+      (`access_token`, `expires_in`).
+    - Dates are ISO 8601: `yyyy-MM-dd` for dates, with offset for date-times.
+    - Unknown request fields are ignored, not refused.
+
+    ## Amounts
+
+    Amounts are in naira (`NGN`) and sent as decimal strings, for example `"5000.00"`, so no
+    precision is lost in any client's JSON parser. Amounts sent to the API have at most two
+    decimal places and must be greater than zero; amounts and balances returned always have
+    exactly two.
+
+    ## Errors
+
+    Every error is an RFC 9457 problem details body (`application/problem+json`) with a stable
+    `code` for programmatic handling, a human-readable `title` and `detail`, and the
+    `correlationId`. See the
+    `Error` schema for the codes.
+
+    ## Lists
+
+    Lists that can grow are paginated: send `limit` (up to 100, default 50) and, for the next page,
+    the `nextCursor` from the previous response as `cursor`. Short reference lists (banks,
+    products, payment types) are returned whole.
+
+    ## Events
+
+    Events are delivered to each client's own AWS SQS queue. They are not API calls; this section
+    documents the messages. Every message is an `Event` (see the schema) whose `data` depends on
+    `eventType`:
+
+    | `eventType` | Sent when | `data` |
+    |---|---|---|
+    | `AccountCredited` | A credit posts on an owned account: inbound transfer, intra-bank transfer in, virtual-account or invoice payment, reversal, interest | `AccountPostingEventData` |
+    | `AccountDebited` | A debit posts on an owned account: transfer out, service debit, fee, charge | `AccountPostingEventData` |
+    | `TransferStatusChanged` | An interbank transfer sent by the client changes status | `TransferStatusChangedEventData` |
+    | `InvoicePaid` | An invoice is paid | `InvoiceEventData` |
+    | `InvoiceExpired` | An invoice expires unpaid | `InvoiceEventData` |
+    | `CustomerCreated` | A customer is created | `CustomerEventData` |
+    | `CustomerKycLevelChanged` | A customer's KYC level changes | `CustomerEventData` |
+    | `AccountOpened` | An account or virtual account is opened | `AccountOpenedEventData` |
+
+    - **Owner only.** An event is delivered only to the client that owns the account or
+      customer it concerns.
+    - **In order per account.** Events about one account arrive in the order they happened.
+    - **At least once.** The same event can arrive more than once; an `eventId` already
+      processed should be ignored.
+    - **Versioned.** Every event carries a `schemaVersion`. New fields can appear at any time
+      within a version, so unknown fields should be ignored.
+    - **Small by design.** Events carry IDs, amounts and the counterparty; other details
+      are available from this API, for example from `GET /v1/accounts/{accountNumber}/transactions/{transactionId}`.
+    - **Retention.** Queue retention is 14 days, so a client outage loses no events.
+
+    ## Tracing
+
+    `X-Correlation-Id` links client and bank logs for one request. If it is not sent, one is
+    generated. It is returned on every response.
+  contact:
+    name: 1UBank Core Banking team
+  license:
+    name: Proprietary. OneUtility Microfinance Bank; for authorised client applications only.
+    identifier: LicenseRef-1UBank-Proprietary
+servers:
+  - url: https://api.dev.cba.1ubank.example
+    description: dev
+  - url: https://api.uat.cba.1ubank.example
+    description: uat
+  - url: https://api.cba.1ubank.example
+    description: prod
+
+security:
+  - clientCredentials: []
+
+tags:
+  - name: Authentication
+    description: Get an access token.
+  - name: Transfers
+    description: |
+      Intra-bank and interbank (NIP) transfers, name enquiry and transfer status.
+
+      An intra-bank transfer is final in the response. An interbank transfer can still be pending
+      when the response returns: the final status arrives as a `TransferStatusChanged`
+      event, and is also available from `GET /v1/transfers/{transactionReference}`.
+  - name: Customers
+    description: |
+      Customers and their KYC level and limits. A customer is identified by `clientId`.
+  - name: Accounts
+    description: Account details, balances, accounts by customer or BVN, and opening further accounts.
+  - name: Virtual accounts
+    description: |
+      Static virtual accounts: permanent numbers that collect payments for an owned account
+      (for example a Smart Transfer group, a cashier, a utility account). An alias account is a
+      static virtual account whose number is the customer's phone number.
+
+      To move money out of a virtual account (a sweep or payout), make an intra-bank transfer
+      with the virtual account as `sourceAccountNumber`.
+  - name: Invoices
+    description: |
+      Dynamic virtual accounts: a temporary number for one expected payment, for example a
+      checkout. It expires after at most 60 minutes. The money goes straight into the collection
+      account; the invoice records who paid and how much.
+  - name: Holds
+    description: |
+      Reserve part of an account's balance ahead of a debit that waits on something else, for
+      example a bill payment confirmed by the biller. A hold lowers the available balance only;
+      the ledger balance does not change until the amount is debited or released.
+  - name: Service debits
+    description: Debit a customer for a service the client provides, for example a bill or SMS alerts.
+  - name: Transactions
+    description: |
+      Account history and single transactions, read live from the core ledger. Works for
+      customer accounts and static and dynamic virtual accounts alike.
+  - name: Reference data
+    description: Savings products and payment types.
+
+paths:
+  /v1/auth/token:
+    post:
+      tags: [Authentication]
+      operationId: getToken
+      summary: Get an access token
+      description: |
+        OAuth 2.0 client credentials. The client ID and secret are sent as form fields or as HTTP
+        Basic authentication. The secret must be kept server-side only.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '200':
+          description: Token issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+              example:
+                access_token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+                token_type: Bearer
+                expires_in: 900
+                scope: customers accounts virtual-accounts transfers interbank
+        '400':
+          description: |
+            The request is not valid: `invalid_request` (for example no `grant_type`, or credentials
+            sent both in the form and as HTTP Basic authentication), `unsupported_grant_type`, or
+            `invalid_scope` (a scope the client does not have).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenError'
+              example:
+                error: unsupported_grant_type
+                error_description: Only client_credentials is supported
+        '401':
+          description: The client ID or secret is wrong, or the client is not active (`invalid_client`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenError'
+              example:
+                error: invalid_client
+                error_description: Invalid client or Invalid client credentials
+        '503':
+          description: Tokens cannot be issued right now (`temporarily_unavailable`); retry shortly.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenError'
+              example:
+                error: temporarily_unavailable
+                error_description: Tokens cannot be issued right now; retry shortly
+
+  /v1/transfers/institutions:
+    get:
+      tags: [Transfers]
+      operationId: listInstitutions
+      summary: List banks for interbank transfers
+      description: Banks and other institutions reachable over NIP, for the bank picker.
+      security:
+        - clientCredentials: [interbank]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The institutions.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Institution'
+              example:
+                - institutionCode: '000013'
+                  institutionName: GTBank
+                - institutionCode: '090605'
+                  institutionName: 1UBank
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/transfers/name-enquiry:
+    post:
+      tags: [Transfers]
+      operationId: nameEnquiry
+      summary: Look up the name on an account
+      description: |
+        Returns the account name at the destination bank, and a `nameInquiryReference` to send
+        with the interbank transfer. Use institution code `090605` for a 1UBank account; no NIBSS
+        call is made then.
+      security:
+        - clientCredentials: [interbank]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NameEnquiryRequest'
+            example:
+              sourceAccountNumber: '2000000110'
+              destinationInstitutionCode: '000013'
+              destinationAccountNumber: '0123456789'
+      responses:
+        '200':
+          description: Account found.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NameEnquiryResponse'
+              example:
+                destinationInstitutionCode: '000013'
+                destinationBankName: GTBank
+                destinationAccountNumber: '0123456789'
+                destinationAccountName: JOHN DOE
+                destinationAccountBvn: '22200000001'
+                nameInquiryReference: '090605261108101500123456789012'
+                sessionId: '090605261108101500123456789012'
+                accountType: SAVINGS
+                isCollectionAccount: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The destination bank has no such account (`ACCOUNT_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                type: https://docs.cba.1ubank.example/problems/account-not-found
+                title: Account not found
+                status: 404
+                code: ACCOUNT_NOT_FOUND
+                detail: The destination bank has no account with this number
+                correlationId: 7f3c2a1e-9b0d-4c55-8e1f-2a6b9c0d1e2f
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /v1/transfers/intra:
+    post:
+      tags: [Transfers]
+      operationId: createIntraBankTransfer
+      summary: Transfer to another 1UBank account
+      description: |
+        Moves money between two 1UBank accounts. The source account must be owned by the
+        client; the destination need not be. Final in the response: `CONFIRMED`, or an error.
+
+        This is also how money leaves a static virtual account (a sweep or payout): the virtual
+        account is the `sourceAccountNumber`.
+
+        Limits are checked by the core on every channel. A transfer over a limit is refused with
+        `422 LIMIT_EXCEEDED`, and nothing is posted.
+      security:
+        - clientCredentials: [transfers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntraBankTransferRequest'
+            example:
+              sourceAccountNumber: '2000000110'
+              destinationAccountNumber: '0000019044'
+              amount: '3400000.00'
+              narration: FARMER PAYMENT
+              transactionReference: TRX-123456ABCDEF012345
+      responses:
+        '200':
+          description: Transfer posted, or the original result of an earlier call with the same reference.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+              example:
+                transactionReference: TRX-123456ABCDEF012345
+                transactionId: '812'
+                transferType: INTRA_BANK
+                transactionStatus: CONFIRMED
+                sourceAccountNumber: '2000000110'
+                destinationInstitutionCode: '090605'
+                destinationAccountNumber: '0000019044'
+                destinationAccountName: FATIMA AKPAN
+                amount: '3400000.00'
+                fee: '0.00'
+                currency: NGN
+                narration: FARMER PAYMENT
+                transactionDate: '2026-11-08T10:15:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/ReferenceConflict'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /v1/transfers/interbank:
+    post:
+      tags: [Transfers]
+      operationId: createInterbankTransfer
+      summary: Transfer to another bank (NIP)
+      description: |
+        Debits the source account (amount plus fee) and sends the transfer to NIBSS. The source
+        account must be owned by the client. Call name enquiry first and send its `nameInquiryReference`.
+
+        The response waits up to 15 seconds for NIBSS. If the outcome is known, it is returned
+        (`SENT_TO_GATEWAY_SUCCESS`, or `REJECTED` with the money returned). Otherwise the status is
+        `PENDING` and the final status follows as a `TransferStatusChanged` event, and is also
+        available from `GET /v1/transfers/{transactionReference}`.
+
+        A transfer is never sent to NIBSS twice, so retry with the same `transactionReference` if
+        a call times out.
+      security:
+        - clientCredentials: [interbank]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InterbankTransferRequest'
+            example:
+              sourceAccountNumber: '2000000110'
+              destinationInstitutionCode: '000013'
+              destinationAccountNumber: '0123456789'
+              destinationAccountName: JOHN DOE
+              destinationBankName: GTBank
+              nameInquiryReference: '090605261108101500123456789012'
+              amount: '5000.00'
+              narration: Payment for invoice 1042
+              transactionReference: TRX-654321FEDCBA098765
+      responses:
+        '200':
+          description: |
+            Transfer accepted. `transactionStatus` is `SENT_TO_GATEWAY_SUCCESS` or `CONFIRMED` when
+            NIBSS has answered, `REJECTED` when it refused and the money was returned, or `PENDING`.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+              example:
+                transactionReference: TRX-654321FEDCBA098765
+                transactionId: '94812'
+                transferType: INTERBANK
+                transactionStatus: SENT_TO_GATEWAY_SUCCESS
+                responseCode: '00'
+                sessionId: '090605261108101500123456789012'
+                sourceAccountNumber: '2000000110'
+                destinationInstitutionCode: '000013'
+                destinationBankName: GTBank
+                destinationAccountNumber: '0123456789'
+                destinationAccountName: JOHN DOE
+                amount: '5000.00'
+                fee: '10.75'
+                currency: NGN
+                narration: Payment for invoice 1042
+                transactionDate: '2026-11-08T10:15:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/ReferenceConflict'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/transfers/{transactionReference}:
+    get:
+      tags: [Transfers]
+      operationId: getTransfer
+      summary: Get a transfer and its current status
+      description: |
+        Works for intra-bank and interbank transfers, by the client's `transactionReference`. Read
+        from the Banking API's records, so it answers quickly and stays available when the
+        ledger or NIBSS is slow.
+      security:
+        - clientCredentials: [transfers]
+        - clientCredentials: [interbank]
+      parameters:
+        - name: transactionReference
+          in: path
+          required: true
+          description: The client's reference for the transfer.
+          schema:
+            $ref: '#/components/schemas/TransactionReference'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The transfer.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transfer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No transfer with this reference for this client (`TRANSFER_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                type: https://docs.cba.1ubank.example/problems/transfer-not-found
+                title: Transfer not found
+                status: 404
+                code: TRANSFER_NOT_FOUND
+                detail: No transfer with reference TRX-000000000000000000
+                correlationId: 7f3c2a1e-9b0d-4c55-8e1f-2a6b9c0d1e2f
+
+  /v1/customers:
+    post:
+      tags: [Customers]
+      operationId: createCustomer
+      summary: Create a customer with their first account
+      description: |
+        Creates the customer and opens and activates their first account in one step: either both
+        exist afterwards, or neither does. The account number is returned.
+
+        Send `firstName` and `lastName` for a person (`clientType: PERSON`), or `fullName` for a
+        business (`clientType: BUSINESS`). The new customer starts at KYC level 1.
+      security:
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+            example:
+              firstName: Ada
+              middleName: Ngozi
+              lastName: Obi
+              dateOfBirth: '1999-06-15'
+              email: ada.obi@example.com
+              mobileNumber: '08012345678'
+              bvn: '22200000001'
+              address: 12 Allen Avenue, Ikeja, Lagos
+              productId: 3
+              clientType: PERSON
+      responses:
+        '201':
+          description: Customer and account created.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateCustomerResponse'
+              example:
+                accountNumber: '2000000158'
+                id: 158
+                clientId: 10
+                firstName: Ada
+                lastName: Obi
+                email: ada.obi@example.com
+                address: 12 Allen Avenue, Ikeja, Lagos
+                dateOfBirth: '1999-06-15'
+                mobileNumber: '08012345678'
+                productId: 3
+                subLedgerActivated: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A customer with this BVN already exists (`CUSTOMER_EXISTS`). Use `POST /v1/customers/search` to get their `clientId`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  /v1/customers/search:
+    post:
+      tags: [Customers]
+      operationId: searchCustomers
+      summary: Search customers by BVN, email or phone
+      description: |
+        Returns the client's customers matching every field sent. Send at least one field. The BVN is sent
+        in the body, never in the URL, so it does not appear in logs.
+      security:
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerSearchRequest'
+            example:
+              bvn: '22200000001'
+      responses:
+        '200':
+          description: Matching customers; an empty list when none match.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/customers/{clientId}/kyc-level:
+    put:
+      tags: [Customers]
+      operationId: setKycLevel
+      summary: Set a customer's KYC level
+      description: |
+        Set after the client's identity checks. The level decides the customer's limits on every
+        channel (levels 1 to 4). Lowering a level takes effect at once.
+      security:
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetKycLevelRequest'
+            example:
+              kycLevel: 2
+      responses:
+        '200':
+          description: Level set.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycLevel'
+              example:
+                clientId: 10
+                kycLevel: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+
+  /v1/customers/{clientId}/transaction-limit:
+    put:
+      tags: [Customers]
+      operationId: setTransactionLimit
+      summary: Set a customer's own daily and single transfer limits
+      description: |
+        For the customer's account `accountNumber`. The limits can be lowered at any KYC level. A level 3
+        customer can also raise them, up to the ceiling for their customer type (individual or
+        business). Anything above the level's limits or the ceiling is refused with
+        `422 LIMIT_EXCEEDED`.
+      security:
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetTransactionLimitRequest'
+            example:
+              accountNumber: '2000000158'
+              dailyTransactionLimit: '1000000.00'
+              singleTransactionLimit: '500000.00'
+      responses:
+        '200':
+          description: Limits set.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetTransactionLimitResponse'
+              example:
+                savingsId: 158
+                accountNumber: '2000000158'
+                dailyTransactionLimit: '1000000.00'
+                singleTransactionLimit: '500000.00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+
+  /v1/customers/{clientId}/accounts:
+    get:
+      tags: [Accounts]
+      operationId: listCustomerAccounts
+      summary: List a customer's accounts
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The customer's accounts, virtual accounts included.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+    post:
+      tags: [Accounts]
+      operationId: openAccount
+      summary: Open another account for a customer
+      description: Opens and activates an account on the given product.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAccountRequest'
+            example:
+              productId: 3
+      responses:
+        '201':
+          description: Account opened.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+
+  /v1/accounts/{accountNumber}:
+    get:
+      tags: [Accounts]
+      operationId: getAccount
+      summary: Get an account and its balances
+      description: Balances are read live from the core ledger.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - name: accountNumber
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/AccountNumber'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The account.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+              example:
+                accountNumber: '2000000158'
+                savingsId: 158
+                clientId: 10
+                accountName: ADA NGOZI OBI
+                productId: 3
+                productName: Individual Savings Account
+                status: ACTIVE
+                currency: NGN
+                currentBalance: '254873.02'
+                availableBalance: '249873.02'
+                kycLevel: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+  /v1/accounts/search:
+    post:
+      tags: [Accounts]
+      operationId: searchAccounts
+      summary: Search accounts by BVN
+      description: |
+        All accounts with this BVN that belong to the client's customers. The BVN is sent in the body, never in the
+        URL, so it does not appear in logs.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountSearchRequest'
+            example:
+              bvn: '22200000001'
+      responses:
+        '200':
+          description: Matching accounts; an empty list when none match.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/virtual-accounts:
+    post:
+      tags: [Virtual accounts]
+      operationId: createVirtualAccount
+      summary: Create a static virtual account
+      description: |
+        Creates a permanent virtual account under an owned parent account. The virtual account
+        belongs to the same customer as the parent, and is owned by the same client.
+
+        - `groupCode` must be one of the group codes configured for the client; any other is refused
+          with `422 GROUP_CODE_NOT_ALLOWED`.
+        - Send `accountNumber` only for an alias account (the customer's phone number, without the
+          leading 0); otherwise one is allocated. A number already in use returns
+          `409 ACCOUNT_NUMBER_TAKEN`.
+        - Credits to the virtual account count towards the customer's KYC balance limit.
+      security:
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVirtualAccountRequest'
+            example:
+              name: Ada Obi - Smart Transfer
+              parentAccountNumber: '2000000158'
+              groupCode: SMART-TRANSFER
+              bvn: '22200000001'
+      responses:
+        '201':
+          description: Virtual account created.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualAccount'
+              example:
+                accountNumber: '9000001234'
+                name: Ada Obi - Smart Transfer
+                parentAccountNumber: '2000000158'
+                groupCode: SMART-TRANSFER
+                bvn: '22200000001'
+                status: ACTIVE
+                createdDate: '2026-11-08T10:15:00+01:00'
+                updatedDate: '2026-11-08T10:15:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          description: The requested `accountNumber` is already in use (`ACCOUNT_NUMBER_TAKEN`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+    get:
+      tags: [Virtual accounts]
+      operationId: listVirtualAccounts
+      summary: List static virtual accounts
+      security:
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - name: parentAccountNumber
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/AccountNumber'
+        - name: groupCode
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The client's virtual accounts matching the filters.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualAccountPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/virtual-accounts/{accountNumber}:
+    get:
+      tags: [Virtual accounts]
+      operationId: getVirtualAccount
+      summary: Get a static virtual account
+      description: For its balance and history, use the account and transaction calls with the same number.
+      security:
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The virtual account.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualAccount'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+    patch:
+      tags: [Virtual accounts]
+      operationId: renameVirtualAccount
+      summary: Rename a static virtual account
+      description: Changes the name payers see on name enquiry. Nothing else changes.
+      security:
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  $ref: '#/components/schemas/VirtualAccountName'
+            example:
+              name: Ada Obi - Shop
+      responses:
+        '200':
+          description: Renamed.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualAccount'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+  /v1/invoices:
+    post:
+      tags: [Invoices]
+      operationId: createInvoice
+      summary: Create an invoice (dynamic virtual account)
+      description: |
+        Allocates a temporary account number for one expected payment. Show it to the payer; they
+        pay into it by bank transfer from any bank.
+
+        - `collectionAccountNumber` must be an owned account: the payment is credited there.
+        - `groupCode` must be one of the group codes configured for the client.
+        - `expiryDate` is at most 60 minutes ahead; it defaults to 60 minutes.
+        - When the payment arrives, an `InvoicePaid` event is delivered;
+          `GET /v1/invoices/{invoiceReference}` shows the same.
+
+        A payment of a different amount is still credited, and `amountPaid` shows what arrived.
+        A payment after `expiryDate` is refused: the payer's bank is told the account cannot take
+        it, so the money never leaves the payer. The invoice ends as `EXPIRED`.
+      security:
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInvoiceRequest'
+            example:
+              invoiceReference: ORD-1042-ATTEMPT-1
+              collectionAccountNumber: '2000000079'
+              groupCode: CHECKOUT
+              amount: '5000.00'
+              description: Order 1042
+              customerName: Acme Stores
+              customerEmail: payments@acmestores.example
+              expiryDate: '2026-11-08T11:15:00+01:00'
+      responses:
+        '201':
+          description: Invoice created, or the original invoice for an earlier call with the same reference.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+              example:
+                invoiceReference: ORD-1042-ATTEMPT-1
+                accountNumber: '9100004321'
+                accountName: Acme Stores
+                collectionAccountNumber: '2000000079'
+                groupCode: CHECKOUT
+                amount: '5000.00'
+                description: Order 1042
+                customerName: Acme Stores
+                customerEmail: payments@acmestores.example
+                status: PENDING
+                expiryDate: '2026-11-08T11:15:00+01:00'
+                createdDate: '2026-11-08T10:15:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/ReferenceConflict'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+
+  /v1/invoices/{invoiceReference}:
+    get:
+      tags: [Invoices]
+      operationId: getInvoice
+      summary: Get an invoice and whether it has been paid
+      security:
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - name: invoiceReference
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/TransactionReference'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The invoice.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+              example:
+                invoiceReference: ORD-1042-ATTEMPT-1
+                accountNumber: '9100004321'
+                accountName: Acme Stores
+                collectionAccountNumber: '2000000079'
+                groupCode: CHECKOUT
+                amount: '5000.00'
+                status: PAID
+                amountPaid: '5000.00'
+                sessionId: '000013261108103000123456789012'
+                payer:
+                  accountName: JOHN DOE
+                  accountNumber: '0123456789'
+                  institutionCode: '000013'
+                  bankName: GTBank
+                paidDate: '2026-11-08T10:30:00+01:00'
+                expiryDate: '2026-11-08T11:15:00+01:00'
+                createdDate: '2026-11-08T10:15:00+01:00'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No invoice with this reference for this client (`INVOICE_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/holds:
+    post:
+      tags: [Holds]
+      operationId: placeHold
+      summary: Place a hold on an account
+      description: |
+        The account must be owned by the client. Placing a hold with a `transactionReference` already used
+        returns the original hold.
+      security:
+        - clientCredentials: [transfers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceHoldRequest'
+            example:
+              accountNumber: '2000000158'
+              amount: '2500.00'
+              reason: Electricity token purchase
+              transactionReference: LIEN-7Q2K9X1M4B
+      responses:
+        '201':
+          description: Hold placed, or the original hold for an earlier call with the same reference.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+              example:
+                transactionReference: LIEN-7Q2K9X1M4B
+                holdTransactionId: 95501
+                accountNumber: '2000000158'
+                savingsId: 158
+                clientId: 10
+                amount: '2500.00'
+                reason: Electricity token purchase
+                status: ACTIVE
+                createdDate: '2026-11-08T10:15:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/ReferenceConflict'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+
+  /v1/holds/release:
+    post:
+      tags: [Holds]
+      operationId: releaseHold
+      summary: Release a hold
+      description: |
+        Identify the hold by the `transactionReference` it was placed with. Migrated holds,
+        placed before the Banking API, have no such reference; release those by `accountNumber`
+        and `holdTransactionId`.
+
+        A hold is released once. Releasing it again returns the original result.
+      security:
+        - clientCredentials: [transfers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseHoldRequest'
+            examples:
+              byReference:
+                summary: A hold placed through this API
+                value:
+                  transactionReference: LIEN-7Q2K9X1M4B
+              byHoldTransactionId:
+                summary: A migrated hold
+                value:
+                  accountNumber: '2000000158'
+                  holdTransactionId: 88214
+      responses:
+        '200':
+          description: Released.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No hold matching this for this client (`HOLD_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/holds/{transactionReference}:
+    get:
+      tags: [Holds]
+      operationId: getHold
+      summary: Get a hold
+      security:
+        - clientCredentials: [transfers]
+      parameters:
+        - name: transactionReference
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/TransactionReference'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The hold.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hold'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No hold with this reference for this client (`HOLD_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/debits:
+    post:
+      tags: [Service debits]
+      operationId: createServiceDebit
+      summary: Debit a customer for a service
+      description: |
+        Debits a customer's account for a service the client provides. The payment type decides
+        where the money goes in the ledger; only payment types configured for the client are
+        accepted (see `GET /v1/payment-types`). The account must be owned by the client. A retry
+        with the same `transactionReference` returns the original debit.
+      security:
+        - clientCredentials: [transfers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceDebitRequest'
+            example:
+              accountNumber: '2000000158'
+              paymentTypeId: 14
+              amount: '24.00'
+              narration: SMS alerts, October 2026
+              transactionReference: SMS-2026-10-0000158
+      responses:
+        '201':
+          description: Debit posted, or the original debit for an earlier call with the same reference.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceDebit'
+              example:
+                transactionReference: SMS-2026-10-0000158
+                transactionId: '95610'
+                accountNumber: '2000000158'
+                paymentTypeId: 14
+                amount: '24.00'
+                narration: SMS alerts, October 2026
+                transactionStatus: CONFIRMED
+                transactionDate: '2026-11-08T10:15:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/ReferenceConflict'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+
+  /v1/accounts/{accountNumber}/transactions:
+    get:
+      tags: [Transactions]
+      operationId: listAccountTransactions
+      summary: List an account's transactions
+      description: |
+        Newest first. `fromDate` and `toDate` are both included, so there is no need to add a day
+        to `toDate`. Leave both out for the last 30 days.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - name: fromDate
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          example: '2026-11-01'
+        - name: toDate
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          example: '2026-11-08'
+        - name: transactionType
+          in: query
+          required: false
+          description: Only credits or only debits.
+          schema:
+            $ref: '#/components/schemas/TransactionType'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The transactions.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+  /v1/accounts/{accountNumber}/transactions/{transactionId}:
+    get:
+      tags: [Transactions]
+      operationId: getAccountTransaction
+      summary: Get one transaction on an account
+      description: |
+        By the core ledger's `transactionId`, for example from an event or from a transfer's
+        response. Works the same for every kind of transaction: there is no separate intra-bank
+        lookup. When the transaction is one side of an intra-bank transfer, `intraBank` is `true`
+        and `transfer` shows both sides.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The transaction.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+              example:
+                transactionId: '95413'
+                accountNumber: '2000000110'
+                transactionType: DEBIT
+                kind: INTRA_BANK_TRANSFER
+                amount: '3400000.00'
+                currency: NGN
+                balanceBefore: '177629171.87'
+                balanceAfter: '174229171.87'
+                narration: FARMER PAYMENT - 2000000110 TO 0000019044
+                transactionReference: TRX-123456ABCDEF012345
+                transactionStatus: CONFIRMED
+                reversed: false
+                intraBank: true
+                transfer:
+                  transferId: '812'
+                  fromAccountNumber: '2000000110'
+                  fromTransactionId: '95413'
+                  toAccountNumber: '0000019044'
+                  toTransactionId: '95414'
+                counterparty:
+                  accountName: FATIMA AKPAN
+                  accountNumber: '0000019044'
+                  institutionCode: '090605'
+                  bankName: 1UBank
+                transactionDate: '2026-10-28T10:15:00+01:00'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No such transaction on this account, or the account is not owned by the client (`TRANSACTION_NOT_FOUND`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/transactions:
+    get:
+      tags: [Transactions]
+      operationId: searchTransactions
+      summary: Find transactions by transaction reference or NIBSS session ID
+      description: |
+        Send `transactionReference` (the client's reference on a transfer, debit or hold) or
+        `sessionId` (an inbound or outbound NIP transfer's session ID). Only transactions on owned accounts are
+        returned.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - name: transactionReference
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/TransactionReference'
+        - name: sessionId
+          in: query
+          required: false
+          schema:
+            type: string
+          example: '000013261108103000123456789012'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Matching transactions; empty when none match.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionPage'
+        '400':
+          description: Neither `transactionReference` nor `sessionId` was sent (`VALIDATION_FAILED`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/products:
+    get:
+      tags: [Reference data]
+      operationId: listProducts
+      summary: List savings products
+      description: The products accounts can be opened on, with the `productId` to send.
+      security:
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The products.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/payment-types:
+    get:
+      tags: [Reference data]
+      operationId: listPaymentTypes
+      summary: List the client's payment types
+      description: Payment types for service debits, for example bills or SMS fees. Only those configured for the client are listed.
+      security:
+        - clientCredentials: [transfers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The payment types.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentType'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    clientCredentials:
+      type: oauth2
+      description: Client credentials. Tokens last 15 minutes.
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/auth/token
+          scopes:
+            customers: Create, find and update customers; set the KYC level
+            accounts: Open accounts; read details, balances and history
+            virtual-accounts: Create, rename and query static and dynamic virtual accounts
+            transfers: Intra-bank transfers, service debits, holds
+            interbank: Bank list, name enquiry, interbank transfers
+
+  parameters:
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: The client's ID for this request, returned on the response and recorded in the bank's logs.
+      schema:
+        type: string
+        maxLength: 64
+
+    ClientId:
+      name: clientId
+      in: path
+      required: true
+      description: The customer's ID, as returned when the customer was created.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 10
+
+    AccountNumberPath:
+      name: accountNumber
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/AccountNumber'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Items per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: '`nextCursor` from the previous page. Leave out for the first page.'
+      schema:
+        type: string
+
+  headers:
+    CorrelationId:
+      description: The correlation ID for this request (as sent, or generated).
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: The request is malformed or a field is invalid (`VALIDATION_FAILED`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://docs.cba.1ubank.example/problems/validation-failed
+            title: Request is not valid
+            status: 400
+            code: VALIDATION_FAILED
+            detail: destinationAccountNumber must be exactly 10 digits
+            correlationId: 7f3c2a1e-9b0d-4c55-8e1f-2a6b9c0d1e2f
+            errors:
+              - field: destinationAccountNumber
+                message: must be exactly 10 digits
+    Unauthorized:
+      description: |
+        The token is missing, invalid or expired, or the client is not active (`UNAUTHORIZED`).
+        Get a new token.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: The client does not have the scope for this call (`FORBIDDEN`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    AccountNotFound:
+      description: |
+        The account does not exist, is not owned by the client, or is closed (`ACCOUNT_NOT_FOUND`). The API
+        does not say which.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    CustomerNotFound:
+      description: The customer does not exist or does not belong to the client (`CUSTOMER_NOT_FOUND`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReferenceConflict:
+      description: |
+        `REFERENCE_REUSED`: this `transactionReference` was already used with a different request.
+        `REQUEST_IN_PROGRESS`: the first request with this reference is still running; retry later.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://docs.cba.1ubank.example/problems/reference-reused
+            title: Reference already used
+            status: 409
+            code: REFERENCE_REUSED
+            detail: transactionReference TRX-123456ABCDEF012345 was already used with a different request
+            correlationId: 7f3c2a1e-9b0d-4c55-8e1f-2a6b9c0d1e2f
+    BusinessRuleRefused:
+      description: |
+        Refused by a banking rule; nothing was posted. `code` is one of `INSUFFICIENT_FUNDS`,
+        `LIMIT_EXCEEDED`, `ACCOUNT_NOT_ACTIVE`, `ACCOUNT_RESTRICTED`, `SCREENING_REFUSED`,
+        `GROUP_CODE_NOT_ALLOWED`, `PAYMENT_TYPE_NOT_ALLOWED`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            type: https://docs.cba.1ubank.example/problems/limit-exceeded
+            title: Limit exceeded
+            status: 422
+            code: LIMIT_EXCEEDED
+            detail: This transfer is over the customer's daily limit of 200000.00
+            correlationId: 7f3c2a1e-9b0d-4c55-8e1f-2a6b9c0d1e2f
+    UpstreamUnavailable:
+      description: |
+        The core ledger or NIBSS could not be reached (`UPSTREAM_UNAVAILABLE`). For a transfer,
+        retry with the same `transactionReference`; it is never posted twice.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UpstreamTimeout:
+      description: The core ledger or NIBSS did not answer in time (`UPSTREAM_TIMEOUT`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    TokenRequest:
+      type: object
+      required: [grant_type]
+      properties:
+        grant_type:
+          type: string
+          const: client_credentials
+        client_id:
+          type: string
+          description: The client ID. Optional if sent as HTTP Basic authentication.
+        client_secret:
+          type: string
+          format: password
+          description: The client secret. Optional if sent as HTTP Basic authentication.
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          description: Seconds until the token expires.
+          example: 900
+        scope:
+          type: string
+          description: Space-separated scopes granted to the client.
+
+    TokenError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: invalid_client
+        error_description:
+          type: string
+
+    Error:
+      type: object
+      description: |
+        RFC 9457 problem details, served as `application/problem+json`. `code` is stable and meant
+        for programmatic handling; `title` and `detail` are human-readable and may change.
+      required: [type, title, status, code, correlationId]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Identifies the kind of problem; one URI per `code`.
+        title:
+          type: string
+          description: Short summary of the kind of problem.
+        status:
+          type: integer
+          description: The HTTP status code.
+        detail:
+          type: string
+          description: What went wrong with this request.
+        instance:
+          type: string
+          description: The request path.
+        code:
+          type: string
+          description: Stable error code. Branch on this.
+          enum:
+            - VALIDATION_FAILED
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - METHOD_NOT_ALLOWED
+            - UNSUPPORTED_MEDIA_TYPE
+            - ACCOUNT_NOT_FOUND
+            - TRANSFER_NOT_FOUND
+            - CUSTOMER_NOT_FOUND
+            - CUSTOMER_EXISTS
+            - ACCOUNT_NUMBER_TAKEN
+            - GROUP_CODE_NOT_ALLOWED
+            - INVOICE_NOT_FOUND
+            - HOLD_NOT_FOUND
+            - PAYMENT_TYPE_NOT_ALLOWED
+            - TRANSACTION_NOT_FOUND
+            - REFERENCE_REUSED
+            - REQUEST_IN_PROGRESS
+            - INSUFFICIENT_FUNDS
+            - LIMIT_EXCEEDED
+            - ACCOUNT_NOT_ACTIVE
+            - ACCOUNT_RESTRICTED
+            - SCREENING_REFUSED
+            - UPSTREAM_UNAVAILABLE
+            - UPSTREAM_TIMEOUT
+            - INTERNAL_ERROR
+        correlationId:
+          type: string
+        errors:
+          type: array
+          description: For `VALIDATION_FAILED`, one entry per invalid field.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    Amount:
+      type: string
+      description: An amount sent to the API, in naira as a decimal string with at most two decimal places. Greater than zero.
+      pattern: '^(?=.*[1-9])\d{1,15}(\.\d{1,2})?$'
+      example: '5000.00'
+
+    Money:
+      type: string
+      description: An amount or balance returned by the API, in naira as a decimal string with exactly two decimal places.
+      pattern: '^-?\d{1,15}\.\d{2}$'
+      example: '5000.00'
+
+    AccountNumber:
+      type: string
+      description: 10-digit account number.
+      pattern: '^\d{10}$'
+      example: '2000000110'
+
+    InstitutionCode:
+      type: string
+      description: 6-digit NIBSS institution code. 1UBank is `090605`.
+      pattern: '^\d{6}$'
+      example: '000013'
+
+    TransactionReference:
+      type: string
+      description: |
+        The client's own reference. Required on every call that moves money; unique across all clients;
+        reusing it returns the original result.
+      pattern: '^[A-Za-z0-9_-]{1,50}$'
+      example: TRX-123456ABCDEF012345
+
+    Narration:
+      type: string
+      maxLength: 100
+      description: Shown on statements. 1UBank adds both account numbers to it.
+      example: Payment for invoice 1042
+
+    Institution:
+      type: object
+      required: [institutionCode, institutionName]
+      properties:
+        institutionCode:
+          $ref: '#/components/schemas/InstitutionCode'
+        institutionName:
+          type: string
+          example: GTBank
+
+    NameEnquiryRequest:
+      type: object
+      required: [destinationInstitutionCode, destinationAccountNumber]
+      properties:
+        sourceAccountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: The owned account the transfer will come from. Optional.
+        destinationInstitutionCode:
+          $ref: '#/components/schemas/InstitutionCode'
+        destinationAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+
+    NameEnquiryResponse:
+      type: object
+      required: [destinationInstitutionCode, destinationBankName, destinationAccountNumber, destinationAccountName]
+      properties:
+        destinationInstitutionCode:
+          $ref: '#/components/schemas/InstitutionCode'
+        destinationBankName:
+          type: string
+        destinationAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        destinationAccountName:
+          type: string
+        destinationAccountBvn:
+          type: string
+          description: The destination account holder's BVN, when the destination bank returns it.
+        nameInquiryReference:
+          type: string
+          description: Name-enquiry reference. Send it with the interbank transfer.
+        sessionId:
+          type: string
+          description: NIBSS session ID of the name enquiry.
+        accountType:
+          type: string
+          description: Type of the destination account, when the destination bank returns it.
+        isCollectionAccount:
+          type: boolean
+          description: |
+            `true` when the number is a 1UBank virtual account (static or dynamic) that collects
+            payments for its owner, rather than a customer's own account.
+
+    IntraBankTransferRequest:
+      type: object
+      required: [sourceAccountNumber, destinationAccountNumber, amount, narration, transactionReference]
+      properties:
+        sourceAccountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: The owned account to debit.
+        destinationAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        amount:
+          $ref: '#/components/schemas/Amount'
+        narration:
+          $ref: '#/components/schemas/Narration'
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+        destinationAccountName:
+          type: string
+          description: Optional. Checked against the account if sent.
+        channel:
+          $ref: '#/components/schemas/Channel'
+        location:
+          $ref: '#/components/schemas/Location'
+
+    InterbankTransferRequest:
+      type: object
+      required:
+        - sourceAccountNumber
+        - destinationInstitutionCode
+        - destinationAccountNumber
+        - nameInquiryReference
+        - amount
+        - narration
+        - transactionReference
+      properties:
+        sourceAccountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: The owned account to debit, for the amount plus the fee.
+        destinationInstitutionCode:
+          $ref: '#/components/schemas/InstitutionCode'
+        destinationAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        destinationAccountName:
+          type: string
+          description: The name from name enquiry.
+        destinationBankName:
+          type: string
+        destinationAccountBvn:
+          type: string
+          description: |
+            The destination account holder's BVN from name enquiry
+            when it returned one.
+        nameInquiryReference:
+          type: string
+          description: From name enquiry.
+        amount:
+          $ref: '#/components/schemas/Amount'
+        narration:
+          $ref: '#/components/schemas/Narration'
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+        channel:
+          $ref: '#/components/schemas/Channel'
+        location:
+          $ref: '#/components/schemas/Location'
+
+    Channel:
+      type: string
+      description: |
+        Where the customer made the transfer. Decides which limits apply. Defaults to `IN_APP`
+        for client applications.
+      enum: [IN_APP, IN_BRANCH]
+      default: IN_APP
+
+    Location:
+      type: object
+      description: Where the customer was, if the client has it. Stored for fraud and dispute checks.
+      properties:
+        latitude:
+          type: number
+        longitude:
+          type: number
+        locationAccuracy:
+          type: number
+          description: Metres.
+        locationSource:
+          type: string
+          example: GPS
+
+    TransactionStatus:
+      type: string
+      description: |
+        - `PENDING`: accepted and debited; the outcome is not known yet.
+        - `SENT_TO_GATEWAY_SUCCESS`: NIBSS accepted the transfer (response code `00`).
+        - `CONFIRMED`: final success. Intra-bank transfers are always `CONFIRMED`; interbank
+          transfers become `CONFIRMED` once a status query confirms them.
+        - `REJECTED`: refused; the debit was reversed and the money is back in the source account.
+        - `UNDER_REVIEW`: the outcome is still unknown after status queries. The money is held
+          while Operations check the NIBSS settlement report. **Do not refund the customer:**
+          the transfer may still have reached the recipient. It ends as `CONFIRMED`, `REVERSED`
+          or `DISPUTED`.
+        - `REVERSED`: it was under review and Operations returned the money to the source account.
+        - `DISPUTED`: raised with NIBSS as a dispute; the money stays held until it is settled.
+      enum: [PENDING, SENT_TO_GATEWAY_SUCCESS, CONFIRMED, REJECTED, UNDER_REVIEW, REVERSED, DISPUTED]
+
+    Transfer:
+      type: object
+      required:
+        - transactionReference
+        - transferType
+        - transactionStatus
+        - sourceAccountNumber
+        - destinationInstitutionCode
+        - destinationAccountNumber
+        - amount
+        - fee
+        - currency
+        - transactionDate
+      properties:
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+        transactionId:
+          type: string
+          description: |
+            The core ledger's ID: the account-transfer ID for an intra-bank transfer, the debit's
+            transaction ID for an interbank transfer. Use it with the transaction details call.
+        transferType:
+          type: string
+          enum: [INTRA_BANK, INTERBANK]
+        transactionStatus:
+          $ref: '#/components/schemas/TransactionStatus'
+        responseCode:
+          type: string
+          description: NIBSS response code, for interbank transfers once NIBSS has answered.
+          example: '00'
+        sessionId:
+          type: string
+          description: NIBSS session ID, for interbank transfers. The recipient's bank knows the transfer by it.
+          example: '090605261108101500123456789012'
+        sourceAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        destinationInstitutionCode:
+          $ref: '#/components/schemas/InstitutionCode'
+        destinationBankName:
+          type: string
+        destinationAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        destinationAccountName:
+          type: string
+        amount:
+          $ref: '#/components/schemas/Money'
+        fee:
+          $ref: '#/components/schemas/Money'
+          description: Fee charged on top of the amount, VAT and stamp duty included. `0.00` for intra-bank.
+          multipleOf: 0.01
+          example: 10.75
+        currency:
+          type: string
+          const: NGN
+        narration:
+          $ref: '#/components/schemas/Narration'
+        transactionDate:
+          type: string
+          format: date-time
+
+    Bvn:
+      type: string
+      description: 11-digit Bank Verification Number.
+      pattern: '^\d{11}$'
+      example: '22200000001'
+
+    ClientType:
+      type: string
+      enum: [PERSON, BUSINESS]
+
+    CreateCustomerRequest:
+      type: object
+      required: [email, mobileNumber, bvn, address, productId, clientType]
+      properties:
+        firstName:
+          type: string
+          description: Required for `PERSON`.
+        middleName:
+          type: string
+        lastName:
+          type: string
+          description: Required for `PERSON`.
+        fullName:
+          type: string
+          description: Business name. Required for `BUSINESS`.
+        dateOfBirth:
+          type: string
+          format: date
+          description: Date of birth (person) or registration date (business).
+          example: '1999-06-15'
+        email:
+          type: string
+          format: email
+        mobileNumber:
+          type: string
+          example: '08012345678'
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        address:
+          type: string
+        productId:
+          type: integer
+          format: int64
+          description: Product for the first account. See `GET /v1/products`.
+        clientType:
+          $ref: '#/components/schemas/ClientType'
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: Optional. Send one to make a retry return the original result instead of `409 CUSTOMER_EXISTS`.
+
+    CreateCustomerResponse:
+      type: object
+      required: [accountNumber, id, clientId, productId]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        id:
+          type: integer
+          format: int64
+          description: The account's ID in the core ledger (`savingsId`).
+        clientId:
+          type: integer
+          format: int64
+          description: The customer's ID. Keep it; customer calls use it.
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+        address:
+          type: string
+        dateOfBirth:
+          type: string
+          format: date
+        mobileNumber:
+          type: string
+        productId:
+          type: integer
+          format: int64
+        subLedgerActivated:
+          type: boolean
+
+    CustomerSearchRequest:
+      type: object
+      minProperties: 1
+      properties:
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        email:
+          type: string
+          format: email
+        mobileNumber:
+          type: string
+
+    Customer:
+      type: object
+      required: [clientId, clientType, kycLevel, status]
+      properties:
+        clientId:
+          type: integer
+          format: int64
+        clientType:
+          $ref: '#/components/schemas/ClientType'
+        firstName:
+          type: string
+        middleName:
+          type: string
+        lastName:
+          type: string
+        fullName:
+          type: string
+        email:
+          type: string
+        mobileNumber:
+          type: string
+        kycLevel:
+          type: integer
+          minimum: 1
+          maximum: 4
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, CLOSED]
+
+    SetKycLevelRequest:
+      type: object
+      required: [kycLevel]
+      properties:
+        kycLevel:
+          type: integer
+          minimum: 1
+          maximum: 4
+        clientId:
+          type: integer
+          format: int64
+          description: Optional; if sent, must match the path.
+
+    KycLevel:
+      type: object
+      required: [clientId, kycLevel]
+      properties:
+        clientId:
+          type: integer
+          format: int64
+        kycLevel:
+          type: integer
+          minimum: 1
+          maximum: 4
+
+    SetTransactionLimitRequest:
+      type: object
+      required: [accountNumber, dailyTransactionLimit, singleTransactionLimit]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        dailyTransactionLimit:
+          $ref: '#/components/schemas/Amount'
+        singleTransactionLimit:
+          $ref: '#/components/schemas/Amount'
+
+    SetTransactionLimitResponse:
+      type: object
+      required: [savingsId, accountNumber, dailyTransactionLimit, singleTransactionLimit]
+      properties:
+        savingsId:
+          type: integer
+          format: int64
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        dailyTransactionLimit:
+          $ref: '#/components/schemas/Money'
+        singleTransactionLimit:
+          $ref: '#/components/schemas/Money'
+
+    OpenAccountRequest:
+      type: object
+      required: [productId]
+      properties:
+        productId:
+          type: integer
+          format: int64
+        clientId:
+          type: integer
+          format: int64
+          description: Optional; if sent, must match the path.
+
+    Account:
+      type: object
+      required: [accountNumber, savingsId, clientId, productId, status, currency, currentBalance, availableBalance]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        savingsId:
+          type: integer
+          format: int64
+          description: The account's ID in the core ledger.
+        clientId:
+          type: integer
+          format: int64
+        accountName:
+          type: string
+        productId:
+          type: integer
+          format: int64
+        productName:
+          type: string
+        accountType:
+          $ref: '#/components/schemas/AccountType'
+        status:
+          type: string
+          enum: [ACTIVE, DORMANT, RESTRICTED, CLOSED]
+        currency:
+          type: string
+          const: NGN
+        currentBalance:
+          $ref: '#/components/schemas/Money'
+          description: Ledger balance.
+        availableBalance:
+          $ref: '#/components/schemas/Money'
+          description: Balance that can be spent now, after holds.
+        kycLevel:
+          type: integer
+          minimum: 1
+          maximum: 4
+
+    Product:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        shortName:
+          type: string
+        description:
+          type: string
+
+    PaymentType:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Send as `paymentTypeId` on a service debit.
+        name:
+          type: string
+        description:
+          type: string
+
+    AccountSearchRequest:
+      type: object
+      required: [bvn]
+      properties:
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+
+    CustomerPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Customer'
+        nextCursor:
+          type: string
+          description: Send as `cursor` for the next page. Absent on the last page.
+
+    AccountPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Account'
+        nextCursor:
+          type: string
+          description: Send as `cursor` for the next page. Absent on the last page.
+
+    VirtualAccountName:
+      type: string
+      minLength: 1
+      maxLength: 100
+      description: The name payers see on name enquiry.
+
+    CreateVirtualAccountRequest:
+      type: object
+      required: [name, parentAccountNumber, groupCode]
+      properties:
+        name:
+          $ref: '#/components/schemas/VirtualAccountName'
+        parentAccountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: An owned account.
+        groupCode:
+          type: string
+          description: One of the group codes configured for the client.
+        accountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: Only for an alias account; the customer's phone number without the leading 0.
+        bvn:
+          allOf:
+            - $ref: '#/components/schemas/Bvn'
+          description: Stored with the virtual account. The customer comes from the parent account, never from the BVN.
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: Optional. Send one to make a retry return the original virtual account.
+
+    VirtualAccount:
+      type: object
+      required: [accountNumber, name, parentAccountNumber, groupCode, status, createdDate]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        name:
+          type: string
+        parentAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        groupCode:
+          type: string
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        isAlias:
+          type: boolean
+          description: '`true` when the number is the customer''s phone number.'
+        status:
+          type: string
+          enum: [ACTIVE, CLOSED]
+        createdDate:
+          type: string
+          format: date-time
+        updatedDate:
+          type: string
+          format: date-time
+
+    VirtualAccountPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/VirtualAccount'
+        nextCursor:
+          type: string
+
+    CreateInvoiceRequest:
+      type: object
+      required: [invoiceReference, collectionAccountNumber, groupCode, amount]
+      properties:
+        invoiceReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: The client's reference for this payment attempt; one invoice per reference.
+        collectionAccountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: An owned account; the payment is credited there.
+        groupCode:
+          type: string
+          description: One of the group codes configured for the client.
+        amount:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          description: The expected amount.
+        description:
+          type: string
+          maxLength: 100
+        customerName:
+          type: string
+          description: Shown to the payer on name enquiry.
+        customerEmail:
+          type: string
+          format: email
+        expiryDate:
+          type: string
+          format: date-time
+          description: At most 60 minutes ahead. Defaults to 60 minutes.
+
+    Invoice:
+      type: object
+      required: [invoiceReference, accountNumber, collectionAccountNumber, groupCode, amount, status, expiryDate, createdDate]
+      properties:
+        invoiceReference:
+          $ref: '#/components/schemas/TransactionReference'
+        accountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: The number the payer transfers to.
+        accountName:
+          type: string
+          description: The name the payer sees on name enquiry.
+        collectionAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        groupCode:
+          type: string
+        amount:
+          $ref: '#/components/schemas/Money'
+        description:
+          type: string
+        customerName:
+          type: string
+        customerEmail:
+          type: string
+        status:
+          type: string
+          description: |
+            - `PENDING`: waiting for payment.
+            - `PAID`: paid before `expiryDate`.
+            - `EXPIRED`: not paid by `expiryDate`. Later payments to the number are refused.
+          enum: [PENDING, PAID, EXPIRED]
+        amountPaid:
+          $ref: '#/components/schemas/Money'
+          description: What actually arrived. May differ from `amount`.
+        sessionId:
+          type: string
+          description: NIBSS session ID of the payment.
+        payer:
+          $ref: '#/components/schemas/Counterparty'
+        paidDate:
+          type: string
+          format: date-time
+        expiryDate:
+          type: string
+          format: date-time
+        createdDate:
+          type: string
+          format: date-time
+
+    Counterparty:
+      type: object
+      description: The other side of a transfer.
+      properties:
+        accountName:
+          type: string
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        institutionCode:
+          $ref: '#/components/schemas/InstitutionCode'
+        bankName:
+          type: string
+
+    PlaceHoldRequest:
+      type: object
+      required: [accountNumber, amount, reason, transactionReference]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        amount:
+          $ref: '#/components/schemas/Amount'
+        reason:
+          type: string
+          maxLength: 100
+          description: Why the money is held.
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+
+    ReleaseHoldRequest:
+      description: Either `transactionReference`, or `accountNumber` with `holdTransactionId`.
+      oneOf:
+        - type: object
+          title: By reference
+          required: [transactionReference]
+          properties:
+            transactionReference:
+              $ref: '#/components/schemas/TransactionReference'
+        - type: object
+          title: By hold transaction ID
+          required: [accountNumber, holdTransactionId]
+          properties:
+            accountNumber:
+              $ref: '#/components/schemas/AccountNumber'
+            holdTransactionId:
+              type: integer
+              format: int64
+
+    Hold:
+      type: object
+      required: [holdTransactionId, accountNumber, amount, status, createdDate]
+      properties:
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: The client's reference. Absent for migrated holds.
+        holdTransactionId:
+          type: integer
+          format: int64
+          description: The hold's transaction ID in the core ledger.
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        savingsId:
+          type: integer
+          format: int64
+        clientId:
+          type: integer
+          format: int64
+        amount:
+          $ref: '#/components/schemas/Money'
+        reason:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, RELEASED]
+        createdDate:
+          type: string
+          format: date-time
+        releasedDate:
+          type: string
+          format: date-time
+
+    ServiceDebitRequest:
+      type: object
+      required: [accountNumber, paymentTypeId, amount, transactionReference]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        paymentTypeId:
+          type: integer
+          format: int64
+          description: One of the client's payment types.
+        amount:
+          $ref: '#/components/schemas/Amount'
+        narration:
+          $ref: '#/components/schemas/Narration'
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+
+    ServiceDebit:
+      type: object
+      required: [transactionReference, transactionId, accountNumber, paymentTypeId, amount, transactionStatus, transactionDate]
+      properties:
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+        transactionId:
+          type: string
+          description: The debit's transaction ID in the core ledger.
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        paymentTypeId:
+          type: integer
+          format: int64
+        amount:
+          $ref: '#/components/schemas/Money'
+        narration:
+          $ref: '#/components/schemas/Narration'
+        transactionStatus:
+          type: string
+          const: CONFIRMED
+        transactionDate:
+          type: string
+          format: date-time
+
+    TransactionType:
+      type: string
+      enum: [CREDIT, DEBIT]
+
+    AccountType:
+      type: string
+      description: '`CUSTOMER` for a customer''s own account; `STATIC_VA` or `DYNAMIC_VA` for virtual accounts.'
+      enum: [CUSTOMER, STATIC_VA, DYNAMIC_VA]
+
+    TransactionKind:
+      type: string
+      description: What the transaction was.
+      enum:
+        - INTRA_BANK_TRANSFER
+        - INTERBANK_TRANSFER
+        - INBOUND_TRANSFER
+        - SERVICE_DEBIT
+        - FEE
+        - REVERSAL
+        - INTEREST
+        - CHARGE
+        - OTHER
+
+    Transaction:
+      type: object
+      required: [transactionId, accountNumber, transactionType, kind, amount, currency, transactionStatus, reversed, intraBank, transactionDate]
+      properties:
+        transactionId:
+          type: string
+          description: The core ledger's ID.
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        transactionType:
+          $ref: '#/components/schemas/TransactionType'
+        kind:
+          $ref: '#/components/schemas/TransactionKind'
+        amount:
+          $ref: '#/components/schemas/Money'
+        currency:
+          type: string
+          const: NGN
+        balanceBefore:
+          $ref: '#/components/schemas/Money'
+          description: Balance before the transaction.
+        balanceAfter:
+          $ref: '#/components/schemas/Money'
+          description: Balance after the transaction.
+        narration:
+          type: string
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: The client's reference, when the transaction came from one of its calls.
+        sessionId:
+          type: string
+          description: NIBSS session ID, for NIP transfers in or out.
+        paymentReference:
+          type: string
+          description: The sender's payment reference on an inbound NIP transfer, when sent.
+        groupCode:
+          type: string
+          description: The virtual account's group code, for transactions on a virtual account.
+        invoiceReference:
+          type: string
+          description: The invoice paid, for a payment into a dynamic virtual account.
+        paymentTypeId:
+          type: integer
+          format: int64
+        transactionStatus:
+          type: string
+          description: '`CONFIRMED` once posted. For an interbank transfer''s debit, the transfer''s own status is on `GET /v1/transfers/{transactionReference}`.'
+          enum: [CONFIRMED]
+        reversed:
+          type: boolean
+          description: '`true` when this transaction was later reversed.'
+        intraBank:
+          type: boolean
+          description: '`true` when this is one side of an intra-bank transfer.'
+        transfer:
+          $ref: '#/components/schemas/TransferLegs'
+        counterparty:
+          allOf:
+            - $ref: '#/components/schemas/Counterparty'
+          description: |
+            The other side: for a credit, the sender; for a debit, the recipient.
+        transactionDate:
+          type: string
+          format: date-time
+
+    TransferLegs:
+      type: object
+      description: Both sides of an intra-bank transfer. Present only when `intraBank` is `true`.
+      required: [transferId, fromAccountNumber, fromTransactionId, toAccountNumber, toTransactionId]
+      properties:
+        transferId:
+          type: string
+          description: The account-transfer ID in the core ledger; the transfer's `transactionId`.
+        fromAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        fromTransactionId:
+          type: string
+        toAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        toTransactionId:
+          type: string
+
+    TransactionPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        nextCursor:
+          type: string
+
+    Event:
+      type: object
+      description: One message on the client's SQS queue. See the Events section for each `eventType`.
+      required: [eventId, eventType, schemaVersion, occurredAt, data]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Unique per event. An ID already processed should be ignored.
+        eventType:
+          type: string
+          enum:
+            - AccountCredited
+            - AccountDebited
+            - TransferStatusChanged
+            - InvoicePaid
+            - InvoiceExpired
+            - CustomerCreated
+            - CustomerKycLevelChanged
+            - AccountOpened
+        schemaVersion:
+          type: integer
+          minimum: 1
+          description: |
+            The layout of this event type's message, starting at `1`. Adding a field keeps the
+            version; removing or renaming one raises it, and both versions are sent until every
+            client has moved to the new one.
+        occurredAt:
+          type: string
+          format: date-time
+        accountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: The account the event is about, when there is one.
+        clientId:
+          type: integer
+          format: int64
+          description: The customer the event is about.
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/AccountPostingEventData'
+            - $ref: '#/components/schemas/TransferStatusChangedEventData'
+            - $ref: '#/components/schemas/InvoiceEventData'
+            - $ref: '#/components/schemas/CustomerEventData'
+            - $ref: '#/components/schemas/AccountOpenedEventData'
+      example:
+        eventId: 3f9a2c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c
+        eventType: AccountCredited
+        schemaVersion: 1
+        occurredAt: '2026-11-08T10:30:00+01:00'
+        accountNumber: '9000001234'
+        clientId: 10
+        data:
+          transactionId: '95720'
+          kind: INBOUND_TRANSFER
+          amount: '20000.00'
+          balanceAfter: '20000.00'
+          narration: Shop payment
+          sessionId: '000013261108103000123456789012'
+          groupCode: SMART-TRANSFER
+          parentAccountNumber: '2000000158'
+          counterparty:
+            accountName: JOHN DOE
+            accountNumber: '0123456789'
+            institutionCode: '000013'
+            bankName: GTBank
+
+    AccountPostingEventData:
+      type: object
+      description: For `AccountCredited` and `AccountDebited`.
+      required: [transactionId, kind, amount]
+      properties:
+        transactionId:
+          type: string
+        kind:
+          $ref: '#/components/schemas/TransactionKind'
+        amount:
+          $ref: '#/components/schemas/Money'
+        balanceAfter:
+          $ref: '#/components/schemas/Money'
+        narration:
+          type: string
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: The client's reference, when the posting came from one of its calls.
+        sessionId:
+          type: string
+          description: NIBSS session ID, for NIP transfers.
+        groupCode:
+          type: string
+          description: For a virtual account, its group code.
+        parentAccountNumber:
+          allOf:
+            - $ref: '#/components/schemas/AccountNumber'
+          description: For a virtual account, its parent account.
+        invoiceReference:
+          type: string
+          description: For a payment into a dynamic virtual account.
+        counterparty:
+          allOf:
+            - $ref: '#/components/schemas/Counterparty'
+          description: The sender of a credit or the recipient of a debit.
+
+    TransferStatusChangedEventData:
+      type: object
+      required: [transactionReference, transactionStatus, previousStatus]
+      properties:
+        transactionReference:
+          $ref: '#/components/schemas/TransactionReference'
+        transactionStatus:
+          $ref: '#/components/schemas/TransactionStatus'
+        previousStatus:
+          $ref: '#/components/schemas/TransactionStatus'
+        responseCode:
+          type: string
+        sessionId:
+          type: string
+
+    InvoiceEventData:
+      type: object
+      description: For `InvoicePaid` and `InvoiceExpired`.
+      required: [invoiceReference, invoiceAccountNumber, collectionAccountNumber, status]
+      properties:
+        invoiceReference:
+          type: string
+        invoiceAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        collectionAccountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        status:
+          type: string
+          enum: [PAID, EXPIRED]
+        amount:
+          $ref: '#/components/schemas/Money'
+        amountPaid:
+          $ref: '#/components/schemas/Money'
+        transactionId:
+          type: string
+          description: The credit to the collection account, for `InvoicePaid`.
+        sessionId:
+          type: string
+        payer:
+          $ref: '#/components/schemas/Counterparty'
+
+    CustomerEventData:
+      type: object
+      description: For `CustomerCreated` and `CustomerKycLevelChanged`.
+      required: [clientId, kycLevel]
+      properties:
+        clientId:
+          type: integer
+          format: int64
+        kycLevel:
+          type: integer
+          minimum: 1
+          maximum: 4
+        previousKycLevel:
+          type: integer
+          minimum: 1
+          maximum: 4
+          description: For `CustomerKycLevelChanged`.
+
+    AccountOpenedEventData:
+      type: object
+      required: [accountNumber, clientId, accountType]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        clientId:
+          type: integer
+          format: int64
+        accountType:
+          $ref: '#/components/schemas/AccountType'
+        productId:
+          type: integer
+          format: int64
