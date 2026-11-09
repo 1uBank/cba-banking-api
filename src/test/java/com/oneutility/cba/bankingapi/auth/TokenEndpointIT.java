@@ -17,8 +17,6 @@ import com.oneutility.cba.bankingapi.auth.dto.ClientCredentials;
 import com.oneutility.cba.bankingapi.auth.dto.IssuedToken;
 import com.oneutility.cba.bankingapi.auth.service.AuthServiceClient;
 import com.oneutility.cba.bankingapi.auth.service.TokenRequestException;
-import com.oneutility.cba.bankingapi.clients.domain.ApiClient;
-import com.oneutility.cba.bankingapi.clients.domain.ApiClientRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -41,14 +39,11 @@ class TokenEndpointIT {
     @Autowired
     private MockMvc mvc;
 
-    @Autowired
-    private ApiClientRepository clients;
-
     @MockitoBean
     private AuthServiceClient authService;
 
     @Test
-    void issuesATokenToAnActiveClient() throws Exception {
+    void issuesAToken() throws Exception {
         when(authService.requestToken(eq(new ClientCredentials("app", "s3cret")), any()))
                 .thenReturn(new IssuedToken("eyJ.a.b", 900, "customers accounts"));
 
@@ -64,25 +59,15 @@ class TokenEndpointIT {
     }
 
     @Test
-    void refusesASuspendedClient() throws Exception {
-        ApiClient suspended = new ApiClient("suspended-at-token", "Suspended");
-        suspended.suspend();
-        clients.save(suspended);
+    void passesOnARefusalFromTheAuthService() throws Exception {
+        when(authService.requestToken(any(), any())).thenThrow(TokenRequestException.invalidClient());
 
         mvc.perform(post("/v1/auth/token").contentType(MediaType.APPLICATION_FORM_URLENCODED)
-                .content("grant_type=client_credentials&client_id=suspended-at-token&client_secret=s3cret"))
+                .content("grant_type=client_credentials&client_id=app&client_secret=wrong"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error").value("invalid_client"))
                 .andExpect(header().exists("WWW-Authenticate"))
                 .andExpect(openApi().isValid(CONTRACT));
-    }
-
-    @Test
-    void refusesAnUnknownClient() throws Exception {
-        mvc.perform(post("/v1/auth/token").contentType(MediaType.APPLICATION_FORM_URLENCODED)
-                .content("grant_type=client_credentials&client_id=nobody&client_secret=x"))
-                .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.error").value("invalid_client"));
     }
 
     @Test

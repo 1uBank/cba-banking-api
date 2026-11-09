@@ -13,9 +13,11 @@ A modular monolith: one deployable, one top-level package per business module un
 
 | Package | Holds |
 |---|---|
-| `auth` | `POST /v1/auth/token`: checks the client is active and forwards the request to the auth service |
-| `clients` | The registry of client applications (`api_client`) and whether each is active |
-| `customers`, `accounts`, `virtualaccounts`, `invoices`, `transfers`, `holds`, `debits`, `transactions`, `referencedata` | The API areas, one per tag in the contract |
+| `auth` | `POST /v1/auth/token`: forwards client token requests to the auth service |
+| `onus` | On-us transactions, where the money stays inside 1UBank: intra-bank transfers (including sweeps out of virtual accounts), service debits and their payment types, holds, and the status of any transfer by its reference. Each is one posting, final in the response |
+| `interbank` | Transfers to other banks (NIP): the bank list, name enquiry, interbank transfers and their status as it changes |
+| `accounts` | Accounts, balances, opening accounts, and the products they are opened on |
+| `customers`, `virtualaccounts`, `invoices`, `transactions` | The other API areas in the contract |
 | `events` | The event table (outbox) and publishing to SNS |
 | `corebanking` | The client for CBA-CORE; other modules call it through its services |
 | `common` | What every module shares: `exception` (error codes, `ApiException`, the error format), `security`, `web` (correlation IDs). Depends on no module |
@@ -102,6 +104,21 @@ Build the image with `docker build -t banking-api .`. It runs as a non-root user
 Before the first start, create a PostgreSQL database, a user, and a schema named `banking_api` owned by that user.
 Liquibase creates and updates the tables on every start.
 
+### The auth service's two addresses
+
+The settings below reach the same auth service by two different addresses:
+
+| | `<auth-domain>` | `<auth service's internal address>` |
+|---|---|---|
+| Example | `https://auth.dev.cba.1ubank.com` | `http://cba-auth.internal:8080` |
+| What it is | Its public name, through the load balancer, with TLS. The value of `KC_HOSTNAME` in cba-auth | Its private address inside the AWS network, straight to the container (for example its service-discovery name) |
+| Reachable from the internet | Yes, apart from `/admin` | No |
+| Used here for | `BANKING_API_AUTH_ISSUER` only | `BANKING_API_AUTH_TOKEN_URL` and `BANKING_API_AUTH_JWK_SET_URI` |
+
+The Banking API calls the auth service on its internal address: it is faster and never leaves the private network. It
+checks every token against the public name, because the auth service writes that name into each token as its issuer,
+whichever address the token was requested on.
+
 ### Environment variables
 
 Required (the service does not start without them):
@@ -113,18 +130,13 @@ Required (the service does not start without them):
 | `BANKING_API_DB_PASSWORD` | Secret, from the secrets manager |
 | `BANKING_API_AUTH_TOKEN_URL` | `http://<auth service's internal address>/realms/clients/protocol/openid-connect/token` |
 | `BANKING_API_AUTH_JWK_SET_URI` | `http://<auth service's internal address>/realms/clients/protocol/openid-connect/certs` |
-| `BANKING_API_AUTH_ISSUER` | `https://<auth-domain>/realms/clients`, see below |
+| `BANKING_API_AUTH_ISSUER` | `https://<auth-domain>/realms/clients` (see "The auth service's two addresses") |
 
 Optional:
 
 | Variable | Default | Value |
 |---|---|---|
 | `BANKING_API_DB_POOL_SIZE` | `10` | Database connections per instance |
-| `BANKING_API_CLIENT_STATUS_CACHE` | `30s` | How long a client's active status is cached; a suspension takes effect within this |
 | `BANKING_API_LOG_FORMAT` | `ecs` | Log format: JSON (Elastic Common Schema) |
 | `BANKING_API_PROBLEM_TYPE_BASE_URI` | `https://docs.cba.1ubank.example/problems/` | Base of the `type` URI in error responses |
 
-Every token states which auth service issued it, as the `iss` field, and the Banking API refuses a token whose
-`iss` is not `BANKING_API_AUTH_ISSUER`. The auth service writes `iss` from its own configured address,
-`https://<auth-domain>` (its `KC_HOSTNAME` setting in cba-auth), followed by `/realms/clients`. So this value is
-that address, even though the Banking API calls the auth service on its internal address.

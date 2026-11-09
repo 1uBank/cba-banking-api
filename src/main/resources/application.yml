@@ -23,10 +23,6 @@ spring:
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.yaml
     default-schema: banking_api
-  cache:
-    cache-names: activeClients
-    caffeine:
-      spec: maximumSize=1000,expireAfterWrite=${BANKING_API_CLIENT_STATUS_CACHE:30s}
   jackson:
     default-property-inclusion: non_null
     deserialization:

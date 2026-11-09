@@ -15,7 +15,8 @@ import com.tngtech.archunit.lang.SimpleConditionEvent;
 
 /**
  * The structure rules (see the README, Layout): a module is {@code controller -> service -> domain}, with {@code dto}
- * for the objects passed between them, and modules reach each other only through their services.
+ * for the objects passed between them, and modules reach each other only through their services. A rule with nothing
+ * to check yet (a layer no module has) passes.
  */
 @AnalyzeClasses(packages = "com.oneutility.cba.bankingapi", importOptions = ImportOption.DoNotIncludeTests.class)
 class ArchitectureTest {
@@ -25,35 +26,43 @@ class ArchitectureTest {
     @ArchTest
     static final ArchRule modules_use_each_other_only_through_services_and_dtos =
             classes().that().resideInAPackage(ROOT + "(*)..").and().resideOutsideOfPackage(ROOT + "common..")
-                    .should(onlyReachOtherModulesThroughServicesAndDtos());
+                    .should(onlyReachOtherModulesThroughServicesAndDtos())
+            .allowEmptyShould(true);
 
     @ArchTest
     static final ArchRule common_depends_on_no_module = noClasses().that().resideInAPackage(ROOT + "common..")
             .should().dependOnClassesThat().resideOutsideOfPackages(ROOT + "common..", "java..", "jakarta..",
-                    "org.springframework..", "org.slf4j..", "com.fasterxml..");
+                    "org.springframework..", "org.slf4j..", "com.fasterxml..")
+            .allowEmptyShould(true);
 
     @ArchTest
     static final ArchRule controllers_do_not_use_the_domain = noClasses().that().resideInAPackage("..controller..")
-            .should().dependOnClassesThat().resideInAPackage(ROOT + "*.domain..");
+            .should().dependOnClassesThat().resideInAPackage(ROOT + "*.domain..")
+            .allowEmptyShould(true);
 
     @ArchTest
     static final ArchRule services_do_not_use_controllers = noClasses().that().resideInAPackage("..service..")
-            .should().dependOnClassesThat().resideInAPackage("..controller..");
+            .should().dependOnClassesThat().resideInAPackage("..controller..")
+            .allowEmptyShould(true);
 
     @ArchTest
     static final ArchRule domain_depends_on_no_other_layer = noClasses().that().resideInAPackage(ROOT + "*.domain..")
-            .should().dependOnClassesThat().resideInAnyPackage("..controller..", "..service..", "..dto..");
+            .should().dependOnClassesThat().resideInAnyPackage("..controller..", "..service..", "..dto..")
+            .allowEmptyShould(true);
 
     @ArchTest
     static final ArchRule dtos_depend_on_no_other_layer = noClasses().that().resideInAPackage("..dto..")
-            .should().dependOnClassesThat().resideInAnyPackage("..controller..", "..service..", ROOT + "*.domain..");
+            .should().dependOnClassesThat().resideInAnyPackage("..controller..", "..service..", ROOT + "*.domain..")
+            .allowEmptyShould(true);
 
     @ArchTest
-    static final ArchRule modules_have_no_cycles = slices().matching(ROOT + "(*)..").should().beFreeOfCycles();
+    static final ArchRule modules_have_no_cycles = slices().matching(ROOT + "(*)..").should().beFreeOfCycles()
+            .allowEmptyShould(true);
 
     @ArchTest
     static final ArchRule transactions_only_in_services = noClasses().that().resideOutsideOfPackage("..service..")
-            .should().beAnnotatedWith("org.springframework.transaction.annotation.Transactional");
+            .should().beAnnotatedWith("org.springframework.transaction.annotation.Transactional")
+            .allowEmptyShould(true);
 
     private static ArchCondition<JavaClass> onlyReachOtherModulesThroughServicesAndDtos() {
         return new ArchCondition<>("use other modules only through their service and dto packages") {

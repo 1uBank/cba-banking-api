@@ -9,8 +9,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.oneutility.cba.bankingapi.IntegrationTest;
-import com.oneutility.cba.bankingapi.clients.domain.ApiClient;
-import com.oneutility.cba.bankingapi.clients.domain.ApiClientRepository;
 import com.oneutility.cba.bankingapi.common.exception.ApiException;
 import com.oneutility.cba.bankingapi.common.exception.ErrorCode;
 import com.oneutility.cba.bankingapi.common.security.CurrentClient;
@@ -39,9 +37,6 @@ class SecurityAndErrorsIT {
     @Autowired
     private MockMvc mvc;
 
-    @Autowired
-    private ApiClientRepository clients;
-
     @Test
     void refusesACallWithoutAToken() throws Exception {
         mvc.perform(get("/test/customers"))
@@ -54,7 +49,7 @@ class SecurityAndErrorsIT {
     }
 
     @Test
-    void letsAnActiveClientWithTheScopeThroughAndKnowsWhoItIs() throws Exception {
+    void letsAClientWithTheScopeThroughAndKnowsWhoItIs() throws Exception {
         mvc.perform(get("/test/customers").with(token("app", "customers")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.clientId").value("app"));
@@ -67,23 +62,7 @@ class SecurityAndErrorsIT {
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));
     }
 
-    @Test
-    void refusesASuspendedClientEvenWithAValidToken() throws Exception {
-        ApiClient suspended = new ApiClient("suspended-on-call", "Suspended");
-        suspended.suspend();
-        clients.save(suspended);
 
-        mvc.perform(get("/test/customers").with(token("suspended-on-call", "customers")))
-                .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"))
-                .andExpect(jsonPath("$.detail").value("The client is not active"));
-    }
-
-    @Test
-    void refusesATokenFromAClientTheRegistryDoesNotKnow() throws Exception {
-        mvc.perform(get("/test/customers").with(token("stranger", "customers")))
-                .andExpect(status().isUnauthorized());
-    }
 
     @Test
     void returnsTheCorrelationIdSentOrANewOne() throws Exception {

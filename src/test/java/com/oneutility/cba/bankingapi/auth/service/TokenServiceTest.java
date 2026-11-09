@@ -5,12 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.oneutility.cba.bankingapi.auth.dto.ClientCredentials;
 import com.oneutility.cba.bankingapi.auth.dto.IssuedToken;
-import com.oneutility.cba.bankingapi.common.security.ActiveClientCheck;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,13 +16,11 @@ import org.junit.jupiter.api.Test;
 
 class TokenServiceTest {
 
-    private final ActiveClientCheck activeClients = mock(ActiveClientCheck.class);
     private final AuthServiceClient authService = mock(AuthServiceClient.class);
-    private final TokenService tokens = new TokenService(activeClients, authService);
+    private final TokenService tokens = new TokenService(authService);
 
     @BeforeEach
-    void activeApp() {
-        when(activeClients.isActive("app")).thenReturn(true);
+    void authServiceIssuesTokens() {
         when(authService.requestToken(any(), any())).thenReturn(new IssuedToken("token", 900, "customers"));
     }
 
@@ -79,12 +75,6 @@ class TokenServiceTest {
         assertRefused(() -> tokens.issue("client_credentials", null, null, noSecret, null), "invalid_client");
     }
 
-    @Test
-    void refusesAClientThatIsNotActiveWithoutAskingTheAuthService() {
-        assertRefused(() -> tokens.issue("client_credentials", "irecharge", "s3cret", null, null), "invalid_client");
-
-        verifyNoInteractions(authService);
-    }
 
     private static void assertRefused(Runnable call, String error) {
         assertThatThrownBy(call::run).isInstanceOfSatisfying(TokenRequestException.class,

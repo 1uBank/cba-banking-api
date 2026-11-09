@@ -2,7 +2,6 @@ package com.oneutility.cba.bankingapi.auth.service;
 
 import com.oneutility.cba.bankingapi.auth.dto.ClientCredentials;
 import com.oneutility.cba.bankingapi.auth.dto.IssuedToken;
-import com.oneutility.cba.bankingapi.common.security.ActiveClientCheck;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -12,9 +11,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 /**
- * Issues access tokens. Reads the client's credentials from the form or from HTTP Basic authentication, refuses a
- * client that is not active, and forwards the request to the auth service, which checks the secret and signs the
- * token.
+ * Issues access tokens. Reads the client's credentials from the form or from HTTP Basic authentication and forwards the
+ * request to the auth service, which checks the secret, refuses a disabled client, and signs the token.
  */
 @Service
 public class TokenService {
@@ -23,11 +21,9 @@ public class TokenService {
     private static final String CLIENT_CREDENTIALS = "client_credentials";
     private static final String BASIC = "Basic ";
 
-    private final ActiveClientCheck activeClients;
     private final AuthServiceClient authService;
 
-    public TokenService(ActiveClientCheck activeClients, AuthServiceClient authService) {
-        this.activeClients = activeClients;
+    public TokenService(AuthServiceClient authService) {
         this.authService = authService;
     }
 
@@ -48,10 +44,6 @@ public class TokenService {
                     "Only client_credentials is supported");
         }
         ClientCredentials credentials = credentials(formClientId, formClientSecret, authorization);
-        if (!activeClients.isActive(credentials.clientId())) {
-            LOG.warn("Token refused for client {}: not an active client", credentials.clientId());
-            throw TokenRequestException.invalidClient();
-        }
         IssuedToken token = authService.requestToken(credentials, blankToNull(scope));
         LOG.info("Token issued to client {} for scopes [{}]", credentials.clientId(), token.scope());
         return token;

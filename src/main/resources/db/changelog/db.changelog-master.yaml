@@ -1,5 +1,3 @@
 # Every database change is a new file under changes/, added at the end of this list.
 # Never edit a change that has run in a shared environment.
-databaseChangeLog:
-  - include:
-      file: db/changelog/changes/0001-api-client.yaml
+databaseChangeLog: []

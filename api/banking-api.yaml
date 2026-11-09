@@ -195,7 +195,7 @@ paths:
                 error: unsupported_grant_type
                 error_description: Only client_credentials is supported
         '401':
-          description: The client ID or secret is wrong, or the client is not active (`invalid_client`).
+          description: The client ID or secret is wrong, or the client has been disabled (`invalid_client`).
           content:
             application/json:
               schema:
@@ -1658,8 +1658,7 @@ components:
                 message: must be exactly 10 digits
     Unauthorized:
       description: |
-        The token is missing, invalid or expired, or the client is not active (`UNAUTHORIZED`).
-        Get a new token.
+        The token is missing, invalid or expired (`UNAUTHORIZED`). Get a new token.
       content:
         application/problem+json:
           schema:

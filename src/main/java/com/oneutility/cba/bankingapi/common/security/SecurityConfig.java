@@ -17,7 +17,6 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
-import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 
 /**
@@ -34,8 +33,7 @@ import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfig {
 
     @Bean
-    SecurityFilterChain apiSecurity(HttpSecurity http, ActiveClientCheck activeClients, ProblemWriter problems)
-            throws Exception {
+    SecurityFilterChain apiSecurity(HttpSecurity http, ProblemWriter problems) throws Exception {
         http.csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> requests
@@ -50,8 +48,7 @@ public class SecurityConfig {
                                 ErrorCode.FORBIDDEN, "The client does not have the scope for this call")))
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint((request, response, e) -> problems.write(request, response,
-                                ErrorCode.UNAUTHORIZED, "The access token is missing, invalid or expired")))
-                .addFilterAfter(new ActiveClientFilter(activeClients, problems), BearerTokenAuthenticationFilter.class);
+                                ErrorCode.UNAUTHORIZED, "The access token is missing, invalid or expired")));
         return http.build();
     }
 
