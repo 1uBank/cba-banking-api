@@ -1,12 +1,13 @@
 # Banking API image. Build: docker build -t banking-api .
-FROM eclipse-temurin:21.0.12.1_1-jdk-noble AS build
+# The same Maven version as the wrapper (.mvn/wrapper/maven-wrapper.properties).
+FROM maven:3.9.15-eclipse-temurin-21-noble AS build
 WORKDIR /src
-COPY gradlew settings.gradle build.gradle ./
-COPY gradle gradle
-RUN ./gradlew --no-daemon dependencies > /dev/null
+COPY pom.xml ./
+RUN mvn -B -q dependency:go-offline
 COPY src src
-RUN ./gradlew --no-daemon bootJar \
- && java -Djarmode=tools -jar build/libs/banking-api-*.jar extract --layers --launcher --destination /app
+# Tests run in CI before the image is built, not in the image build.
+RUN mvn -B -q package -DskipTests \
+ && java -Djarmode=tools -jar target/banking-api.jar extract --layers --launcher --destination /app
 
 FROM eclipse-temurin:21.0.12.1_1-jre-noble
 RUN groupadd --system banking-api && useradd --system --gid banking-api --no-create-home banking-api

@@ -1,7 +1,6 @@
 .git
-.gradle
 .idea
-build
+target
 docs
 *.iml
 .env

@@ -4,7 +4,7 @@ The only service client applications (the 1UBank App, iRecharge, ...) call, and 
 CBA-CORE (Fineract). Its contract is [`api/banking-api.yaml`](api/banking-api.yaml) (OpenAPI 3.1); the readable
 reference is [`docs/index.html`](docs/index.html).
 
-Java 21, Spring Boot 3.5, Gradle, PostgreSQL with Liquibase, following the CBA Engineering Standards.
+Java 21, Spring Boot 3.5, Maven, PostgreSQL with Liquibase, following the CBA Engineering Standards.
 
 ## Layout
 
@@ -59,11 +59,11 @@ cp .env.example .env            # then set BANKING_API_DB_PASSWORD to any random
 docker compose up -d --build    # the Banking API on http://localhost:8085, health on http://localhost:9105
 ```
 
-Or run it from the IDE or Gradle, against the compose database:
+Or run it from the IDE or Maven, against the compose database:
 
 ```bash
 docker compose up -d banking-api-db
-BANKING_API_DB_PASSWORD=<value from .env> ./gradlew bootRun --args='--spring.profiles.active=local'
+BANKING_API_DB_PASSWORD=<value from .env> ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
 The `local` profile points at `localhost:5434` and `localhost:8180`, and logs as plain text.
@@ -77,11 +77,11 @@ curl -s -X POST http://localhost:8085/v1/auth/token -u "app:<secret>" -d grant_t
 ## Tests
 
 ```bash
-./gradlew check
+./mvnw verify
 ```
 
 Runs unit, integration and architecture tests (Docker must be running for Testcontainers) and fails under 80% line
-coverage. The coverage report is in `build/reports/jacoco/test/html`.
+coverage. The coverage report is in `target/site/jacoco/index.html`.
 
 ## API docs
 
