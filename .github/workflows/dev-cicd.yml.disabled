@@ -1,0 +1,195 @@
+name: dev banking api CI/CD
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'cba-core-dev-banking-api' }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'cba-core-dev' }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE || 'cba-core-dev-banking-api' }}
+  ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME || 'cba-core' }}
+
+jobs:
+
+  build-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Maven verify
+        run: ./mvnw -B verify
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco
+          if-no-files-found: ignore
+
+
+  build-push:
+    name: Build image and push to ECR
+    needs: build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image URI
+        id: image
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Building image: $IMAGE"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  deploy-to-ecs:
+    name: Deploy to ECS
+    needs: build-push
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE: ${{ needs.build-push.outputs.image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate deployment configuration
+        run: |
+          if [ -z "$IMAGE" ]; then
+            echo "ERROR: Docker image URI is missing"
+            exit 1
+          fi
+
+          if [ -z "$ECS_CONTAINER_NAME" ]; then
+            echo "ERROR: ECS container name is missing"
+            exit 1
+          fi
+
+      - name: Fetch current ECS task definition
+        run: |
+          TASK_DEFINITION_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          if [ -z "$TASK_DEFINITION_ARN" ] || [ "$TASK_DEFINITION_ARN" = "None" ]; then
+            echo "ERROR: ECS service or task definition not found"
+            exit 1
+          fi
+
+          echo "Current task definition: $TASK_DEFINITION_ARN"
+
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --query 'taskDefinition' \
+            --output json > task-definition-original.json
+
+      - name: Update task definition image
+        run: |
+          jq -e --arg container "$ECS_CONTAINER_NAME" \
+            'any(.containerDefinitions[]; .name == $container)' \
+            task-definition-original.json > /dev/null || {
+              echo "ERROR: Container $ECS_CONTAINER_NAME not found"
+              exit 1
+            }
+
+          jq \
+            --arg image "$IMAGE" \
+            --arg container "$ECS_CONTAINER_NAME" \
+            'del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            ) |
+            (.containerDefinitions[] |
+              select(.name == $container).image) = $image' \
+            task-definition-original.json > task-definition.json
+
+          echo "Updated image: $IMAGE"
+
+      - name: Register new ECS task definition
+        id: task-definition
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          if [ -z "$NEW_TASK_DEF_ARN" ] || [ "$NEW_TASK_DEF_ARN" = "None" ]; then
+            echo "ERROR: Failed to register task definition"
+            exit 1
+          fi
+
+          echo "task_definition_arn=$NEW_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+
+          echo "New task definition: $NEW_TASK_DEF_ARN"
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.task-definition.outputs.task_definition_arn }}" \
+            --force-new-deployment
+
+    
