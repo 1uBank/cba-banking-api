@@ -4,6 +4,7 @@ The only service client applications (the 1UBank App, iRecharge, ...) call, and 
 CBA-CORE (Fineract). Its contract is [`api/banking-api.yaml`](api/banking-api.yaml) (OpenAPI 3.1); the readable
 reference is [`docs/index.html`](docs/index.html).
 
+
 Java 21, Spring Boot 3.5, Maven, PostgreSQL with Liquibase, following the CBA Engineering Standards.
 
 ## Layout
