@@ -13,7 +13,7 @@ env:
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'cba-core-dev-banking-api' }}
   ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'cba-core-dev' }}
   ECS_SERVICE: ${{ vars.ECS_SERVICE || 'cba-core-dev-banking-api' }}
-  ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME || 'cba-core' }}
+  ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME || 'cba-banking-api' }}
 
 jobs:
 
