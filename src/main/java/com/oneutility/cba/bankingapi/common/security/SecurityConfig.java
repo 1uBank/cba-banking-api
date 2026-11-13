@@ -26,7 +26,8 @@ import org.springframework.security.web.SecurityFilterChain;
  *
  * <pre>{@code @PreAuthorize("hasAuthority('SCOPE_transfers')")}</pre>
  *
- * Only the token endpoint and the actuator (on its own, private port) are open.
+ * Only the token endpoint, the API reference ({@code /docs/} and the contract it renders) and the actuator (on its
+ * own, private port) are open.
  */
 @Configuration
 @EnableMethodSecurity
@@ -39,6 +40,8 @@ public class SecurityConfig {
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers(EndpointRequest.toAnyEndpoint()).permitAll()
                         .requestMatchers(HttpMethod.POST, "/v1/auth/token").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/docs", "/docs/", "/docs/index.html",
+                                "/api/banking-api.yaml").permitAll()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {
                 })

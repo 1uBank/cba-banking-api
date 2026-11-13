@@ -5,6 +5,8 @@ WORKDIR /src
 COPY pom.xml ./
 RUN mvn -B -q dependency:go-offline
 COPY src src
+COPY api api
+COPY docs docs
 # Tests run in CI before the image is built, not in the image build.
 RUN mvn -B -q package -DskipTests \
  && java -Djarmode=tools -jar target/banking-api.jar extract --layers --launcher --destination /app
