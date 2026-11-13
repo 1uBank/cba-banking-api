@@ -1,6 +1,5 @@
 .git
 .idea
 target
-docs
 *.iml
 .env

@@ -105,6 +105,26 @@
 
     <build>
         <finalName>banking-api</finalName>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <!-- The contract and its Scalar page, served at /api/banking-api.yaml and /docs/ (DocsConfig). -->
+            <resource>
+                <directory>api</directory>
+                <targetPath>static/api</targetPath>
+                <includes>
+                    <include>banking-api.yaml</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>docs</directory>
+                <targetPath>static/docs</targetPath>
+                <includes>
+                    <include>index.html</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

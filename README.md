@@ -86,7 +86,11 @@ coverage. The coverage report is in `target/site/jacoco/index.html`.
 
 ## API docs
 
-`docs/index.html` renders `api/banking-api.yaml` with Scalar. Serve the repository root and open `/docs/`:
+`docs/index.html` renders `api/banking-api.yaml` with Scalar. The build copies both into the jar, so every running
+Banking API serves them without a token: the docs at `/docs/` and the contract at `/api/banking-api.yaml` (for
+example http://localhost:8085/docs/).
+
+While editing the contract, serve the repository root instead, so a page refresh shows the change without a rebuild:
 
 ```bash
 python3 -m http.server 8090     # http://localhost:8090/docs/
