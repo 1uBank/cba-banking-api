@@ -102,7 +102,7 @@ info:
     name: Proprietary. OneUtility Microfinance Bank; for authorised client applications only.
     identifier: LicenseRef-1UBank-Proprietary
 servers:
-  - url: https://api.dev.cba.1ubank.example
+  - url: https://dev-banking-api.madobimfb.com
     description: dev
   - url: https://api.uat.cba.1ubank.example
     description: uat
