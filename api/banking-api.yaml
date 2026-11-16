@@ -110,6 +110,7 @@ servers:
     description: prod
 
 security:
+  - bearerToken: []
   - clientCredentials: []
 
 tags:
@@ -129,12 +130,15 @@ tags:
     description: Account details, balances, accounts by customer or BVN, and opening further accounts.
   - name: Virtual accounts
     description: |
-      Static virtual accounts: permanent numbers that collect payments for an owned account
-      (for example a Smart Transfer group, a cashier, a utility account). An alias account is a
-      static virtual account whose number is the customer's phone number.
+      Static virtual accounts: permanent numbers that collect payments and hold their own balance,
+      under an owned parent account. Each has a `type` (see `VirtualAccountType`). An `AIRTIME`
+      virtual account's number is the customer's phone number; every other type gets a number
+      allocated.
 
-      To move money out of a virtual account (a sweep or payout), make an intra-bank transfer
-      with the virtual account as `sourceAccountNumber`.
+      To move money out of a virtual account, make an intra-bank transfer with the virtual
+      account as `sourceAccountNumber` and its parent as `destinationAccountNumber`. Money can
+      only move from a virtual account to its parent; any other destination is refused with
+      `422 ACCOUNT_RESTRICTED`.
   - name: Invoices
     description: |
       Dynamic virtual accounts: a temporary number for one expected payment, for example a
@@ -145,6 +149,11 @@ tags:
       Reserve part of an account's balance ahead of a debit that waits on something else, for
       example a bill payment confirmed by the biller. A hold lowers the available balance only;
       the ledger balance does not change until the amount is debited or released.
+  - name: Blocks
+    description: |
+      Stop money coming into or going out of an owned account, for example to pause a cashier's
+      collection account. A client lifts only the blocks it placed: blocks placed by the bank
+      (in the back office, or by compliance screening) are lifted by the bank only.
   - name: Service debits
     description: Debit a customer for a service the client provides, for example a bill or SMS alerts.
   - name: Transactions
@@ -220,6 +229,7 @@ paths:
       summary: List banks for interbank transfers
       description: Banks and other institutions reachable over NIP, for the bank picker.
       security:
+        - bearerToken: []
         - clientCredentials: [interbank]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -257,6 +267,7 @@ paths:
         with the interbank transfer. Use institution code `090605` for a 1UBank account; no NIBSS
         call is made then.
       security:
+        - bearerToken: []
         - clientCredentials: [interbank]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -329,6 +340,7 @@ paths:
         Limits are checked by the core on every channel. A transfer over a limit is refused with
         `422 LIMIT_EXCEEDED`, and nothing is posted.
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -402,6 +414,7 @@ paths:
         A transfer is never sent to NIBSS twice, so retry with the same `transactionReference` if
         a call times out.
       security:
+        - bearerToken: []
         - clientCredentials: [interbank]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -475,6 +488,7 @@ paths:
         from the Banking API's records, so it answers quickly and stays available when the
         ledger or NIBSS is slow.
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
         - clientCredentials: [interbank]
       parameters:
@@ -525,6 +539,7 @@ paths:
         Send `firstName` and `lastName` for a person (`clientType: PERSON`), or `fullName` for a
         business (`clientType: BUSINESS`). The new customer starts at KYC level 1.
       security:
+        - bearerToken: []
         - clientCredentials: [customers]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -591,6 +606,7 @@ paths:
         Returns the client's customers matching every field sent. Send at least one field. The BVN is sent
         in the body, never in the URL, so it does not appear in logs.
       security:
+        - bearerToken: []
         - clientCredentials: [customers]
       parameters:
         - $ref: '#/components/parameters/Limit'
@@ -630,6 +646,7 @@ paths:
         Set after the client's identity checks. The level decides the customer's limits on every
         channel (levels 1 to 4). Lowering a level takes effect at once.
       security:
+        - bearerToken: []
         - clientCredentials: [customers]
       parameters:
         - $ref: '#/components/parameters/ClientId'
@@ -675,6 +692,7 @@ paths:
         business). Anything above the level's limits or the ceiling is refused with
         `422 LIMIT_EXCEEDED`.
       security:
+        - bearerToken: []
         - clientCredentials: [customers]
       parameters:
         - $ref: '#/components/parameters/ClientId'
@@ -721,6 +739,7 @@ paths:
       operationId: listCustomerAccounts
       summary: List a customer's accounts
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - $ref: '#/components/parameters/ClientId'
@@ -749,6 +768,7 @@ paths:
       summary: Open another account for a customer
       description: Opens and activates an account on the given product.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - $ref: '#/components/parameters/ClientId'
@@ -787,6 +807,7 @@ paths:
       summary: Get an account and its balances
       description: Balances are read live from the core ledger.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - name: accountNumber
@@ -833,6 +854,7 @@ paths:
         All accounts with this BVN that belong to the client's customers. The BVN is sent in the body, never in the
         URL, so it does not appear in logs.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - $ref: '#/components/parameters/Limit'
@@ -872,13 +894,17 @@ paths:
         Creates a permanent virtual account under an owned parent account. The virtual account
         belongs to the same customer as the parent, and is owned by the same client.
 
-        - `groupCode` must be one of the group codes configured for the client; any other is refused
-          with `422 GROUP_CODE_NOT_ALLOWED`.
-        - Send `accountNumber` only for an alias account (the customer's phone number, without the
-          leading 0); otherwise one is allocated. A number already in use returns
-          `409 ACCOUNT_NUMBER_TAKEN`.
+        - `type` must be one of the types allowed for the client; any other is refused with
+          `422 VIRTUAL_ACCOUNT_TYPE_NOT_ALLOWED`.
+        - The name payers see on name enquiry is built by the bank as `<owner's name> - <label>`.
+          The owner's name always comes from the customer's verified details; only `label` is
+          the client's.
+        - For `AIRTIME`, send `accountNumber`: the customer's phone number, without the leading 0.
+          For every other type, leave it out; a number is allocated. A number already in use
+          returns `409 ACCOUNT_NUMBER_TAKEN`.
         - Credits to the virtual account count towards the customer's KYC balance limit.
       security:
+        - bearerToken: []
         - clientCredentials: [virtual-accounts]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -889,9 +915,9 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateVirtualAccountRequest'
             example:
-              name: Ada Obi - Smart Transfer
+              label: Smart Transfer
               parentAccountNumber: '2000000158'
-              groupCode: SMART-TRANSFER
+              type: SMART_TRANSFER
               bvn: '22200000001'
       responses:
         '201':
@@ -906,8 +932,9 @@ paths:
               example:
                 accountNumber: '9000001234'
                 name: Ada Obi - Smart Transfer
+                label: Smart Transfer
                 parentAccountNumber: '2000000158'
-                groupCode: SMART-TRANSFER
+                type: SMART_TRANSFER
                 bvn: '22200000001'
                 status: ACTIVE
                 createdDate: '2026-11-08T10:15:00+01:00'
@@ -933,6 +960,7 @@ paths:
       operationId: listVirtualAccounts
       summary: List static virtual accounts
       security:
+        - bearerToken: []
         - clientCredentials: [virtual-accounts]
       parameters:
         - name: parentAccountNumber
@@ -940,11 +968,11 @@ paths:
           required: false
           schema:
             $ref: '#/components/schemas/AccountNumber'
-        - name: groupCode
+        - name: type
           in: query
           required: false
           schema:
-            type: string
+            $ref: '#/components/schemas/VirtualAccountType'
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/CorrelationId'
@@ -970,6 +998,7 @@ paths:
       summary: Get a static virtual account
       description: For its balance and history, use the account and transaction calls with the same number.
       security:
+        - bearerToken: []
         - clientCredentials: [virtual-accounts]
       parameters:
         - $ref: '#/components/parameters/AccountNumberPath'
@@ -993,9 +1022,12 @@ paths:
     patch:
       tags: [Virtual accounts]
       operationId: renameVirtualAccount
-      summary: Rename a static virtual account
-      description: Changes the name payers see on name enquiry. Nothing else changes.
+      summary: Change a static virtual account's label
+      description: |
+        Changes the label, and so the name payers see on name enquiry (`<owner's name> - <label>`).
+        Nothing else changes.
       security:
+        - bearerToken: []
         - clientCredentials: [virtual-accounts]
       parameters:
         - $ref: '#/components/parameters/AccountNumberPath'
@@ -1006,15 +1038,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
+              required: [label]
               properties:
-                name:
-                  $ref: '#/components/schemas/VirtualAccountName'
+                label:
+                  $ref: '#/components/schemas/VirtualAccountLabel'
             example:
-              name: Ada Obi - Shop
+              label: Shop
       responses:
         '200':
-          description: Renamed.
+          description: Label changed.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -1031,6 +1063,43 @@ paths:
         '404':
           $ref: '#/components/responses/AccountNotFound'
 
+  /v1/virtual-accounts/{accountNumber}/close:
+    post:
+      tags: [Virtual accounts]
+      operationId: closeVirtualAccount
+      summary: Close a static virtual account
+      description: |
+        Closes the virtual account for good: payments to it are refused from then on, and its
+        number is never given to another account.
+
+        - The balance must be zero: move it to the parent first. Otherwise `422 ACCOUNT_NOT_EMPTY`.
+        - No hold or block may be in place. Otherwise `422 ACCOUNT_RESTRICTED`.
+        - Closing a closed virtual account returns it unchanged.
+      security:
+        - bearerToken: []
+        - clientCredentials: [virtual-accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Closed.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualAccount'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+
   /v1/invoices:
     post:
       tags: [Invoices]
@@ -1041,15 +1110,22 @@ paths:
         pay into it by bank transfer from any bank.
 
         - `collectionAccountNumber` must be an owned account: the payment is credited there.
-        - `groupCode` must be one of the group codes configured for the client.
         - `expiryDate` is at most 60 minutes ahead; it defaults to 60 minutes.
+        - The name payers see on name enquiry is `<collection account owner's name> - <label>`.
         - When the payment arrives, an `InvoicePaid` event is delivered;
           `GET /v1/invoices/{invoiceReference}` shows the same.
 
-        A payment of a different amount is still credited, and `amountPaid` shows what arrived.
-        A payment after `expiryDate` is refused: the payer's bank is told the account cannot take
-        it, so the money never leaves the payer. The invoice ends as `EXPIRED`.
+        The client chooses what is accepted:
+
+        - `amountRule`: `ANY` (the default) credits whatever arrives; `EXACT` refuses any other
+          amount; `AT_LEAST` refuses less than `amount`.
+        - `multiplePayments`: `false` (the default) refuses payments after the first accepted one;
+          `true` accepts payments until `expiryDate`, and `amountPaid` is their total.
+
+        A refused payment never leaves the payer: their bank is told the account cannot take it.
+        A payment after `expiryDate` is always refused, and an unpaid invoice ends as `EXPIRED`.
       security:
+        - bearerToken: []
         - clientCredentials: [virtual-accounts]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -1062,10 +1138,10 @@ paths:
             example:
               invoiceReference: ORD-1042-ATTEMPT-1
               collectionAccountNumber: '2000000079'
-              groupCode: CHECKOUT
               amount: '5000.00'
               description: Order 1042
-              customerName: Acme Stores
+              label: Order 1042
+              amountRule: EXACT
               customerEmail: payments@acmestores.example
               expiryDate: '2026-11-08T11:15:00+01:00'
       responses:
@@ -1081,12 +1157,13 @@ paths:
               example:
                 invoiceReference: ORD-1042-ATTEMPT-1
                 accountNumber: '9100004321'
-                accountName: Acme Stores
+                accountName: Acme Stores - Order 1042
                 collectionAccountNumber: '2000000079'
-                groupCode: CHECKOUT
                 amount: '5000.00'
+                amountRule: EXACT
+                multiplePayments: false
                 description: Order 1042
-                customerName: Acme Stores
+                label: Order 1042
                 customerEmail: payments@acmestores.example
                 status: PENDING
                 expiryDate: '2026-11-08T11:15:00+01:00'
@@ -1110,6 +1187,7 @@ paths:
       operationId: getInvoice
       summary: Get an invoice and whether it has been paid
       security:
+        - bearerToken: []
         - clientCredentials: [virtual-accounts]
       parameters:
         - name: invoiceReference
@@ -1131,9 +1209,8 @@ paths:
               example:
                 invoiceReference: ORD-1042-ATTEMPT-1
                 accountNumber: '9100004321'
-                accountName: Acme Stores
+                accountName: Acme Stores - Order 1042
                 collectionAccountNumber: '2000000079'
-                groupCode: CHECKOUT
                 amount: '5000.00'
                 status: PAID
                 amountPaid: '5000.00'
@@ -1166,6 +1243,7 @@ paths:
         The account must be owned by the client. Placing a hold with a `transactionReference` already used
         returns the original hold.
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -1224,7 +1302,11 @@ paths:
         and `holdTransactionId`.
 
         A hold is released once. Releasing it again returns the original result.
+
+        A hold placed by the bank (in the back office, or by compliance screening) cannot be
+        released here: `422 ACCOUNT_RESTRICTED`.
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -1266,6 +1348,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
 
   /v1/holds/{transactionReference}:
     get:
@@ -1273,6 +1357,7 @@ paths:
       operationId: getHold
       summary: Get a hold
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
       parameters:
         - name: transactionReference
@@ -1299,17 +1384,139 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /v1/accounts/{accountNumber}/blocks:
+    post:
+      tags: [Blocks]
+      operationId: placeBlock
+      summary: Block an account
+      description: |
+        - `CREDIT`: payments into the account are refused; the payer's bank is told the account
+          cannot take them, so the money never leaves the payer.
+        - `DEBIT`: money cannot leave the account.
+        - `ALL`: both.
+
+        The account must be owned by the client. Blocking what is already blocked returns the
+        current blocks unchanged.
+      security:
+        - bearerToken: []
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceBlockRequest'
+            example:
+              type: CREDIT
+              reason: Cashier on leave
+      responses:
+        '201':
+          description: Blocked. The account's blocks now in place.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountBlocks'
+              example:
+                accountNumber: '9000001234'
+                blocks:
+                  - type: CREDIT
+                    placedBy: CLIENT
+                    reason: Cashier on leave
+                    placedDate: '2026-11-16T09:00:00+01:00'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+    get:
+      tags: [Blocks]
+      operationId: listBlocks
+      summary: List an account's blocks
+      description: Every block in place on the account, whoever placed it.
+      security:
+        - bearerToken: []
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The account's blocks.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountBlocks'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+  /v1/accounts/{accountNumber}/blocks/{type}/lift:
+    post:
+      tags: [Blocks]
+      operationId: liftBlock
+      summary: Lift a block the client placed
+      description: |
+        Lifts a block of this `type` that the client placed. A block placed by the bank stays in
+        place: `422 ACCOUNT_RESTRICTED`, and the account stays blocked. Lifting a block that is not
+        in place returns the current blocks unchanged.
+      security:
+        - bearerToken: []
+        - clientCredentials: [accounts]
+      parameters:
+        - $ref: '#/components/parameters/AccountNumberPath'
+        - name: type
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/BlockType'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Lifted. The account's blocks still in place.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountBlocks'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '422':
+          $ref: '#/components/responses/BusinessRuleRefused'
+
   /v1/debits:
     post:
       tags: [Service debits]
       operationId: createServiceDebit
       summary: Debit a customer for a service
       description: |
-        Debits a customer's account for a service the client provides. The payment type decides
-        where the money goes in the ledger; only payment types configured for the client are
-        accepted (see `GET /v1/payment-types`). The account must be owned by the client. A retry
+        Debits a customer's account for a service the client provides. The payment type, sent by
+        name, decides where the money goes in the ledger; only payment types configured for the
+        client are accepted (see `GET /v1/payment-types`). Any other is refused with
+        `422 PAYMENT_TYPE_NOT_ALLOWED`. The account must be owned by the client. A retry
         with the same `transactionReference` returns the original debit.
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -1321,7 +1528,7 @@ paths:
               $ref: '#/components/schemas/ServiceDebitRequest'
             example:
               accountNumber: '2000000158'
-              paymentTypeId: 14
+              paymentType: SMS Alert Fee
               amount: '24.00'
               narration: SMS alerts, October 2026
               transactionReference: SMS-2026-10-0000158
@@ -1339,7 +1546,7 @@ paths:
                 transactionReference: SMS-2026-10-0000158
                 transactionId: '95610'
                 accountNumber: '2000000158'
-                paymentTypeId: 14
+                paymentType: SMS Alert Fee
                 amount: '24.00'
                 narration: SMS alerts, October 2026
                 transactionStatus: CONFIRMED
@@ -1366,6 +1573,7 @@ paths:
         Newest first. `fromDate` and `toDate` are both included, so there is no need to add a day
         to `toDate`. Leave both out for the last 30 days.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - $ref: '#/components/parameters/AccountNumberPath'
@@ -1422,6 +1630,7 @@ paths:
         lookup. When the transaction is one side of an intra-bank transfer, `intraBank` is `true`
         and `transfer` shows both sides.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - $ref: '#/components/parameters/AccountNumberPath'
@@ -1488,6 +1697,7 @@ paths:
         `sessionId` (an inbound or outbound NIP transfer's session ID). Only transactions on owned accounts are
         returned.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - name: transactionReference
@@ -1532,6 +1742,7 @@ paths:
       summary: List savings products
       description: The products accounts can be opened on, with the `productId` to send.
       security:
+        - bearerToken: []
         - clientCredentials: [accounts]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -1556,6 +1767,7 @@ paths:
       summary: List the client's payment types
       description: Payment types for service debits, for example bills or SMS fees. Only those configured for the client are listed.
       security:
+        - bearerToken: []
         - clientCredentials: [transfers]
       parameters:
         - $ref: '#/components/parameters/CorrelationId'
@@ -1575,9 +1787,18 @@ paths:
 
 components:
   securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        The access token from `POST /v1/auth/token`, sent as `Authorization: Bearer <access_token>`.
+        In these docs, paste it here, or use `clientCredentials` to have the token fetched for you.
     clientCredentials:
       type: oauth2
-      description: Client credentials. Tokens last 15 minutes.
+      description: |
+        Client credentials. Tokens last 15 minutes. In these docs, enter the client ID and secret and
+        press Authorize: the token is fetched and sent as `Authorization: Bearer <access_token>`.
       flows:
         clientCredentials:
           tokenUrl: /v1/auth/token
@@ -1702,7 +1923,7 @@ components:
       description: |
         Refused by a banking rule; nothing was posted. `code` is one of `INSUFFICIENT_FUNDS`,
         `LIMIT_EXCEEDED`, `ACCOUNT_NOT_ACTIVE`, `ACCOUNT_RESTRICTED`, `SCREENING_REFUSED`,
-        `GROUP_CODE_NOT_ALLOWED`, `PAYMENT_TYPE_NOT_ALLOWED`.
+        `VIRTUAL_ACCOUNT_TYPE_NOT_ALLOWED`, `PAYMENT_TYPE_NOT_ALLOWED`, `ACCOUNT_NOT_EMPTY`.
       content:
         application/problem+json:
           schema:
@@ -1810,7 +2031,7 @@ components:
             - CUSTOMER_NOT_FOUND
             - CUSTOMER_EXISTS
             - ACCOUNT_NUMBER_TAKEN
-            - GROUP_CODE_NOT_ALLOWED
+            - VIRTUAL_ACCOUNT_TYPE_NOT_ALLOWED
             - INVOICE_NOT_FOUND
             - HOLD_NOT_FOUND
             - PAYMENT_TYPE_NOT_ALLOWED
@@ -1821,6 +2042,7 @@ components:
             - LIMIT_EXCEEDED
             - ACCOUNT_NOT_ACTIVE
             - ACCOUNT_RESTRICTED
+            - ACCOUNT_NOT_EMPTY
             - SCREENING_REFUSED
             - UPSTREAM_UNAVAILABLE
             - UPSTREAM_TIMEOUT
@@ -2338,14 +2560,11 @@ components:
 
     PaymentType:
       type: object
-      required: [id, name]
+      required: [name]
       properties:
-        id:
-          type: integer
-          format: int64
-          description: Send as `paymentTypeId` on a service debit.
         name:
           type: string
+          description: Send as `paymentType` on a service debit.
         description:
           type: string
 
@@ -2380,29 +2599,43 @@ components:
           type: string
           description: Send as `cursor` for the next page. Absent on the last page.
 
-    VirtualAccountName:
+    VirtualAccountLabel:
       type: string
       minLength: 1
-      maxLength: 100
-      description: The name payers see on name enquiry.
+      maxLength: 50
+      description: |
+        The client's part of the name payers see on name enquiry. The bank puts the owner's name
+        in front of it: `<owner's name> - <label>`.
+
+    VirtualAccountType:
+      type: string
+      description: |
+        What a static virtual account is for. Each client may create only the types allowed for it.
+
+        - `SMART_TRANSFER`: a Smart Transfer group's account.
+        - `AIRTIME`: airtime top-up; the account number is the customer's phone number.
+        - `CASHIER_COLLECTION`: a business cashier's collection account.
+        - `MERCHANT_COLLECTION`: a merchant's collection account.
+        - `ELECTRICITY`: an electricity utility account.
+        - `CABLE_TV`: a cable TV utility account.
+      enum: [SMART_TRANSFER, AIRTIME, CASHIER_COLLECTION, MERCHANT_COLLECTION, ELECTRICITY, CABLE_TV]
 
     CreateVirtualAccountRequest:
       type: object
-      required: [name, parentAccountNumber, groupCode]
+      required: [label, parentAccountNumber, type]
       properties:
-        name:
-          $ref: '#/components/schemas/VirtualAccountName'
+        label:
+          $ref: '#/components/schemas/VirtualAccountLabel'
         parentAccountNumber:
           allOf:
             - $ref: '#/components/schemas/AccountNumber'
           description: An owned account.
-        groupCode:
-          type: string
-          description: One of the group codes configured for the client.
+        type:
+          $ref: '#/components/schemas/VirtualAccountType'
         accountNumber:
           allOf:
             - $ref: '#/components/schemas/AccountNumber'
-          description: Only for an alias account; the customer's phone number without the leading 0.
+          description: Required for `AIRTIME`, refused for any other type. The customer's phone number without the leading 0.
         bvn:
           allOf:
             - $ref: '#/components/schemas/Bvn'
@@ -2414,21 +2647,21 @@ components:
 
     VirtualAccount:
       type: object
-      required: [accountNumber, name, parentAccountNumber, groupCode, status, createdDate]
+      required: [accountNumber, name, label, parentAccountNumber, type, status, createdDate]
       properties:
         accountNumber:
           $ref: '#/components/schemas/AccountNumber'
         name:
           type: string
+          description: 'The name payers see on name enquiry: `<owner''s name> - <label>`.'
+        label:
+          $ref: '#/components/schemas/VirtualAccountLabel'
         parentAccountNumber:
           $ref: '#/components/schemas/AccountNumber'
-        groupCode:
-          type: string
+        type:
+          $ref: '#/components/schemas/VirtualAccountType'
         bvn:
           $ref: '#/components/schemas/Bvn'
-        isAlias:
-          type: boolean
-          description: '`true` when the number is the customer''s phone number.'
         status:
           type: string
           enum: [ACTIVE, CLOSED]
@@ -2450,9 +2683,67 @@ components:
         nextCursor:
           type: string
 
+    BlockType:
+      type: string
+      description: |
+        - `CREDIT`: no money in.
+        - `DEBIT`: no money out.
+        - `ALL`: neither.
+      enum: [CREDIT, DEBIT, ALL]
+
+    PlaceBlockRequest:
+      type: object
+      required: [type, reason]
+      properties:
+        type:
+          $ref: '#/components/schemas/BlockType'
+        reason:
+          type: string
+          maxLength: 100
+
+    AccountBlocks:
+      type: object
+      required: [accountNumber, blocks]
+      properties:
+        accountNumber:
+          $ref: '#/components/schemas/AccountNumber'
+        blocks:
+          type: array
+          description: Empty when the account is not blocked.
+          items:
+            type: object
+            required: [type, placedBy, placedDate]
+            properties:
+              type:
+                $ref: '#/components/schemas/BlockType'
+              placedBy:
+                type: string
+                description: |
+                  - `CLIENT`: this client; it can lift the block.
+                  - `BANK`: the bank, in the back office or through compliance screening; only the
+                    bank can lift it.
+                enum: [CLIENT, BANK]
+              reason:
+                type: string
+                description: The client's reason. Not shown for a block placed by the bank.
+              placedDate:
+                type: string
+                format: date-time
+
+    InvoiceAmountRule:
+      type: string
+      description: |
+        Which payment amounts an invoice accepts.
+
+        - `ANY`: any amount.
+        - `EXACT`: only `amount`.
+        - `AT_LEAST`: `amount` or more.
+      default: ANY
+      enum: [ANY, EXACT, AT_LEAST]
+
     CreateInvoiceRequest:
       type: object
-      required: [invoiceReference, collectionAccountNumber, groupCode, amount]
+      required: [invoiceReference, collectionAccountNumber, amount]
       properties:
         invoiceReference:
           allOf:
@@ -2462,19 +2753,23 @@ components:
           allOf:
             - $ref: '#/components/schemas/AccountNumber'
           description: An owned account; the payment is credited there.
-        groupCode:
-          type: string
-          description: One of the group codes configured for the client.
         amount:
           allOf:
             - $ref: '#/components/schemas/Amount'
           description: The expected amount.
+        amountRule:
+          $ref: '#/components/schemas/InvoiceAmountRule'
+        multiplePayments:
+          type: boolean
+          default: false
+          description: '`true` accepts payments until `expiryDate`; `false` refuses payments after the first accepted one.'
         description:
           type: string
           maxLength: 100
-        customerName:
-          type: string
-          description: Shown to the payer on name enquiry.
+        label:
+          allOf:
+            - $ref: '#/components/schemas/VirtualAccountLabel'
+          description: 'Shown after the collection account owner''s name on name enquiry: `<owner''s name> - <label>`.'
         customerEmail:
           type: string
           format: email
@@ -2485,7 +2780,7 @@ components:
 
     Invoice:
       type: object
-      required: [invoiceReference, accountNumber, collectionAccountNumber, groupCode, amount, status, expiryDate, createdDate]
+      required: [invoiceReference, accountNumber, collectionAccountNumber, amount, status, expiryDate, createdDate]
       properties:
         invoiceReference:
           $ref: '#/components/schemas/TransactionReference'
@@ -2498,13 +2793,15 @@ components:
           description: The name the payer sees on name enquiry.
         collectionAccountNumber:
           $ref: '#/components/schemas/AccountNumber'
-        groupCode:
-          type: string
         amount:
           $ref: '#/components/schemas/Money'
+        amountRule:
+          $ref: '#/components/schemas/InvoiceAmountRule'
+        multiplePayments:
+          type: boolean
         description:
           type: string
-        customerName:
+        label:
           type: string
         customerEmail:
           type: string
@@ -2517,7 +2814,7 @@ components:
           enum: [PENDING, PAID, EXPIRED]
         amountPaid:
           $ref: '#/components/schemas/Money'
-          description: What actually arrived. May differ from `amount`.
+          description: What arrived, the total of all accepted payments. May differ from `amount` under `ANY`.
         sessionId:
           type: string
           description: NIBSS session ID of the payment.
@@ -2616,14 +2913,13 @@ components:
 
     ServiceDebitRequest:
       type: object
-      required: [accountNumber, paymentTypeId, amount, transactionReference]
+      required: [accountNumber, paymentType, amount, transactionReference]
       properties:
         accountNumber:
           $ref: '#/components/schemas/AccountNumber'
-        paymentTypeId:
-          type: integer
-          format: int64
-          description: One of the client's payment types.
+        paymentType:
+          type: string
+          description: The name of one of the client's payment types.
         amount:
           $ref: '#/components/schemas/Amount'
         narration:
@@ -2633,7 +2929,7 @@ components:
 
     ServiceDebit:
       type: object
-      required: [transactionReference, transactionId, accountNumber, paymentTypeId, amount, transactionStatus, transactionDate]
+      required: [transactionReference, transactionId, accountNumber, paymentType, amount, transactionStatus, transactionDate]
       properties:
         transactionReference:
           $ref: '#/components/schemas/TransactionReference'
@@ -2642,9 +2938,8 @@ components:
           description: The debit's transaction ID in the core ledger.
         accountNumber:
           $ref: '#/components/schemas/AccountNumber'
-        paymentTypeId:
-          type: integer
-          format: int64
+        paymentType:
+          type: string
         amount:
           $ref: '#/components/schemas/Money'
         narration:
@@ -2715,15 +3010,16 @@ components:
         paymentReference:
           type: string
           description: The sender's payment reference on an inbound NIP transfer, when sent.
-        groupCode:
-          type: string
-          description: The virtual account's group code, for transactions on a virtual account.
+        virtualAccountType:
+          allOf:
+            - $ref: '#/components/schemas/VirtualAccountType'
+          description: For a transaction on a virtual account, its type.
         invoiceReference:
           type: string
           description: The invoice paid, for a payment into a dynamic virtual account.
-        paymentTypeId:
-          type: integer
-          format: int64
+        paymentType:
+          type: string
+          description: The payment type's name.
         transactionStatus:
           type: string
           description: '`CONFIRMED` once posted. For an interbank transfer''s debit, the transfer''s own status is on `GET /v1/transfers/{transactionReference}`.'
@@ -2832,7 +3128,7 @@ components:
           balanceAfter: '20000.00'
           narration: Shop payment
           sessionId: '000013261108103000123456789012'
-          groupCode: SMART-TRANSFER
+          virtualAccountType: SMART_TRANSFER
           parentAccountNumber: '2000000158'
           counterparty:
             accountName: JOHN DOE
@@ -2862,9 +3158,10 @@ components:
         sessionId:
           type: string
           description: NIBSS session ID, for NIP transfers.
-        groupCode:
-          type: string
-          description: For a virtual account, its group code.
+        virtualAccountType:
+          allOf:
+            - $ref: '#/components/schemas/VirtualAccountType'
+          description: For a virtual account, its type.
         parentAccountNumber:
           allOf:
             - $ref: '#/components/schemas/AccountNumber'

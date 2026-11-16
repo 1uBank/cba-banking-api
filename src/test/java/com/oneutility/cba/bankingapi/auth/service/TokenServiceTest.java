@@ -57,8 +57,17 @@ class TokenServiceTest {
     }
 
     @Test
-    void refusesCredentialsSentTwoWays() {
-        assertRefused(() -> tokens.issue("client_credentials", "app", "s3cret", basic("app", "s3cret"), null),
+    void acceptsTheSameCredentialsSentTwoWays() {
+        tokens.issue("client_credentials", "app", "s3cret", basic("app", "s3cret"), null);
+
+        verify(authService).requestToken(new ClientCredentials("app", "s3cret"), null);
+    }
+
+    @Test
+    void refusesDifferentCredentialsSentTwoWays() {
+        assertRefused(() -> tokens.issue("client_credentials", "app", "other", basic("app", "s3cret"), null),
+                "invalid_request");
+        assertRefused(() -> tokens.issue("client_credentials", "irecharge", "s3cret", basic("app", "s3cret"), null),
                 "invalid_request");
     }
 

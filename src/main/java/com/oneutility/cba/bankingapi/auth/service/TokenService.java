@@ -52,13 +52,15 @@ public class TokenService {
     private static ClientCredentials credentials(String formClientId, String formClientSecret, String authorization) {
         boolean inHeader = authorization != null && authorization.regionMatches(true, 0, BASIC, 0, BASIC.length());
         boolean inForm = formClientSecret != null && !formClientSecret.isBlank();
-        if (inHeader && inForm) {
-            // RFC 6749 section 2.3: a client uses one authentication method per request.
-            throw new TokenRequestException(HttpStatus.BAD_REQUEST, "invalid_request",
-                    "Send the client credentials either in the form or as HTTP Basic authentication, not both");
-        }
         if (inHeader) {
-            return fromBasic(authorization.substring(BASIC.length()).trim());
+            ClientCredentials basic = fromBasic(authorization.substring(BASIC.length()).trim());
+            // RFC 6749 section 2.3: one authentication method per request. Some tools (the docs page's
+            // "Authorize") send the same credentials both ways; that is accepted, different ones are not.
+            if (inForm && !basic.equals(new ClientCredentials(formClientId, formClientSecret))) {
+                throw new TokenRequestException(HttpStatus.BAD_REQUEST, "invalid_request",
+                        "The client credentials in the form and in HTTP Basic authentication differ");
+            }
+            return basic;
         }
         if (formClientId == null || formClientId.isBlank() || !inForm) {
             throw TokenRequestException.invalidClient();
