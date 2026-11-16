@@ -59,6 +59,21 @@ class TokenEndpointIT {
     }
 
     @Test
+    void ignoresAnOldTokenSentWithTheRequest() throws Exception {
+        when(authService.requestToken(eq(new ClientCredentials("app", "s3cret")), any()))
+                .thenReturn(new IssuedToken("eyJ.a.b", 900, "customers accounts"));
+
+        // An expired token, and the empty "Bearer" the docs page's "Try it" sends.
+        for (String authorization : new String[] {"Bearer expired.or.invalid", "Bearer"}) {
+            mvc.perform(post("/v1/auth/token").header("Authorization", authorization)
+                    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .content("grant_type=client_credentials&client_id=app&client_secret=s3cret"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.access_token").value("eyJ.a.b"));
+        }
+    }
+
+    @Test
     void passesOnARefusalFromTheAuthService() throws Exception {
         when(authService.requestToken(any(), any())).thenThrow(TokenRequestException.invalidClient());
 

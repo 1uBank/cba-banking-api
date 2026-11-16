@@ -17,6 +17,8 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.server.resource.web.BearerTokenResolver;
+import org.springframework.security.oauth2.server.resource.web.DefaultBearerTokenResolver;
 import org.springframework.security.web.SecurityFilterChain;
 
 /**
@@ -45,6 +47,7 @@ public class SecurityConfig {
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(server -> server.jwt(jwt -> {
                 })
+                        .bearerTokenResolver(bearerTokens())
                         .authenticationEntryPoint((request, response, e) -> problems.write(request, response,
                                 ErrorCode.UNAUTHORIZED, "The access token is missing, invalid or expired"))
                         .accessDeniedHandler((request, response, e) -> problems.write(request, response,
@@ -53,6 +56,15 @@ public class SecurityConfig {
                         .authenticationEntryPoint((request, response, e) -> problems.write(request, response,
                                 ErrorCode.UNAUTHORIZED, "The access token is missing, invalid or expired")));
         return http.build();
+    }
+
+    /**
+     * Reads the access token from the {@code Authorization} header, except on the token endpoint: a client that sends
+     * its old, expired token while asking for a new one (an HTTP tool's saved header, for example) still gets one.
+     */
+    static BearerTokenResolver bearerTokens() {
+        DefaultBearerTokenResolver header = new DefaultBearerTokenResolver();
+        return request -> "/v1/auth/token".equals(request.getRequestURI()) ? null : header.resolve(request);
     }
 
     @Bean
