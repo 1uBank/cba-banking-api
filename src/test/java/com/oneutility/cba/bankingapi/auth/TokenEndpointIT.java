@@ -81,8 +81,35 @@ class TokenEndpointIT {
                 .content("grant_type=client_credentials&client_id=app&client_secret=wrong"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error").value("invalid_client"))
-                .andExpect(header().exists("WWW-Authenticate"))
+                // No Basic challenge for form credentials: a browser would open its own sign-in box.
+                .andExpect(header().doesNotExist("WWW-Authenticate"))
                 .andExpect(openApi().isValid(CONTRACT));
+    }
+
+    @Test
+    void challengesAClientThatUsedBasicAuthentication() throws Exception {
+        when(authService.requestToken(any(), any())).thenThrow(TokenRequestException.invalidClient());
+
+        mvc.perform(post("/v1/auth/token").header("Authorization", "Basic YXBwOndyb25n")
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .content("grant_type=client_credentials"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("invalid_client"))
+                .andExpect(header().string("WWW-Authenticate", "Basic realm=\"banking-api\""))
+                .andExpect(openApi().isValid(CONTRACT));
+    }
+
+    @Test
+    void doesNotChallengeAClientThatAlsoSentTheCredentialsInTheForm() throws Exception {
+        when(authService.requestToken(any(), any())).thenThrow(TokenRequestException.invalidClient());
+
+        // What the docs page's "Authorize" sends: the same credentials as HTTP Basic and in the form.
+        mvc.perform(post("/v1/auth/token").header("Authorization", "Basic YXBwOndyb25n")
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .content("grant_type=client_credentials&client_id=app&client_secret=wrong"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("invalid_client"))
+                .andExpect(header().doesNotExist("WWW-Authenticate"));
     }
 
     @Test
