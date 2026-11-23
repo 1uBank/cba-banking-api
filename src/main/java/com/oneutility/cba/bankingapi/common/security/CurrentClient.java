@@ -23,7 +23,8 @@ public final class CurrentClient {
         return find().orElseThrow(() -> new IllegalStateException("No authenticated client on this thread"));
     }
 
-    static Optional<String> find() {
+    /** The calling client's ID, or empty outside an authenticated request. */
+    public static Optional<String> find() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication instanceof JwtAuthenticationToken token) {
             return clientId(token.getToken());

@@ -527,17 +527,19 @@ paths:
                 detail: No transfer with reference TRX-000000000000000000
                 correlationId: 7f3c2a1e-9b0d-4c55-8e1f-2a6b9c0d1e2f
 
-  /v1/customers:
+  /v1/individual-customers:
     post:
       tags: [Customers]
-      operationId: createCustomer
-      summary: Create a customer with their first account
+      operationId: createIndividualCustomer
+      summary: Create an individual customer with their first account
       description: |
-        Creates the customer and opens and activates their first account in one step: either both
-        exist afterwards, or neither does. The account number is returned.
+        Creates the person and opens and activates their first account in one step: either both exist
+        afterwards, or neither does. The account number is returned. Everything else sent here can be changed later
+        with `PUT /v1/individual-customers/{clientId}`.
 
-        Send `firstName` and `lastName` for a person (`clientType: PERSON`), or `fullName` for a
-        business (`clientType: BUSINESS`). The new customer starts at KYC level 1.
+        A BVN, NIN, TIN or mobile number already used by another customer is refused with
+        `409 CUSTOMER_EXISTS`. The KYC level, PEP status, risk rating and transaction limit sent here are later changed
+        with their own calls.
       security:
         - bearerToken: []
         - clientCredentials: [customers]
@@ -548,7 +550,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateCustomerRequest'
+              $ref: '#/components/schemas/CreateIndividualRequest'
             example:
               firstName: Ada
               middleName: Ngozi
@@ -557,9 +559,16 @@ paths:
               email: ada.obi@example.com
               mobileNumber: '08012345678'
               bvn: '22200000001'
-              address: 12 Allen Avenue, Ikeja, Lagos
+              nin: '12345678901'
+              address:
+                addressLine1: 12 Allen Avenue
+                city: Ikeja
+                state: Lagos
+                country: Nigeria
               productId: 3
-              clientType: PERSON
+              kycLevel: 1
+              pep: false
+              riskRating: LOW
       responses:
         '201':
           description: Customer and account created.
@@ -571,13 +580,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/CreateCustomerResponse'
               example:
-                accountNumber: '2000000158'
+                accountNumber: '0020000158'
                 id: 158
                 clientId: 10
+                clientType: PERSON
                 firstName: Ada
                 lastName: Obi
                 email: ada.obi@example.com
-                address: 12 Allen Avenue, Ikeja, Lagos
+                address:
+                  addressLine1: 12 Allen Avenue
+                  city: Ikeja
+                  state: Lagos
+                  country: Nigeria
                 dateOfBirth: '1999-06-15'
                 mobileNumber: '08012345678'
                 productId: 3
@@ -589,13 +603,235 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
-          description: A customer with this BVN already exists (`CUSTOMER_EXISTS`). Use `POST /v1/customers/search` to get their `clientId`.
+          description: |
+            A customer with this BVN or mobile number already exists (`CUSTOMER_EXISTS`); `detail` says which.
+            Use `POST /v1/customers/search` to get their `clientId`.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
         '502':
           $ref: '#/components/responses/UpstreamUnavailable'
+
+
+  /v1/business-customers:
+    post:
+      tags: [Customers]
+      operationId: createBusinessCustomer
+      summary: Create a business customer with its first account
+      description: |
+        Creates the business, its directors and signatories, and opens and activates its first account in one
+        step: either all of it exists afterwards, or none of it does. The account number is returned. Everything
+        else sent here can be changed later with `PUT /v1/business-customers/{clientId}`.
+
+        A BVN, NIN, TIN or mobile number already used by another customer is refused with
+        `409 CUSTOMER_EXISTS`. The KYC level, PEP status, risk rating and transaction limit sent here are later changed
+        with their own calls. A CAC registration number already used is refused the same way.
+      security:
+        - bearerToken: []
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBusinessRequest'
+            example:
+              businessName: Ada Ventures Ltd
+              registrationDate: '2019-03-01'
+              email: hello@adaventures.example
+              mobileNumber: '08033334444'
+              bvn: '22200000021'
+              cacNumber: RC123456
+              tin: '12345678-0001'
+              address:
+                addressLine1: 5 Broad Street
+                city: Lagos Island
+                state: Lagos
+              productId: 4
+              kycLevel: 2
+              relatedPersons:
+                - firstName: Ada
+                  lastName: Obi
+                  role: DIRECTOR_AND_SIGNATORY
+                  bvn: '22200000011'
+                  ownershipPercentage: 60
+      responses:
+        '201':
+          description: Customer and account created.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateCustomerResponse'
+              example:
+                accountNumber: '0050000159'
+                id: 159
+                clientId: 11
+                clientType: BUSINESS
+                businessName: Ada Ventures Ltd
+                email: hello@adaventures.example
+                address:
+                  addressLine1: 5 Broad Street
+                  city: Lagos Island
+                  state: Lagos
+                  country: Nigeria
+                registrationDate: '2019-03-01'
+                mobileNumber: '08033334444'
+                productId: 4
+                subLedgerActivated: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: |
+            A customer with this BVN or mobile number already exists (`CUSTOMER_EXISTS`); `detail` says which.
+            Use `POST /v1/customers/search` to get their `clientId`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+
+  /v1/customers/{clientId}:
+    get:
+      tags: [Customers]
+      operationId: getCustomer
+      summary: Get a customer
+      security:
+        - bearerToken: []
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: The customer.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+  /v1/individual-customers/{clientId}:
+    put:
+      tags: [Customers]
+      operationId: updateIndividualCustomer
+      summary: Update an individual customer
+      description: |
+        Changes the fields sent and leaves the rest as they are; all or nothing. A BVN, NIN, TIN or mobile number
+        already used by another customer is refused with `409 CUSTOMER_EXISTS`. The customer must be an individual (`clientType: PERSON`); a business is refused with `400`.
+      security:
+        - bearerToken: []
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateIndividualRequest'
+            example:
+              nin: '12345678901'
+              address:
+                addressLine1: 5 Broad Street
+                city: Lagos Island
+                state: Lagos
+      responses:
+        '200':
+          description: Updated. The customer as they now are.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+        '409':
+          description: Another customer already has this BVN, NIN, TIN or mobile number (`CUSTOMER_EXISTS`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+
+  /v1/business-customers/{clientId}:
+    put:
+      tags: [Customers]
+      operationId: updateBusinessCustomer
+      summary: Update a business customer
+      description: |
+        Changes the fields sent and leaves the rest as they are; all or nothing. A BVN, NIN, TIN or mobile number
+        already used by another customer is refused with `409 CUSTOMER_EXISTS`. The customer must be a business (`clientType: BUSINESS`); an individual is refused with `400`.
+      security:
+        - bearerToken: []
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBusinessRequest'
+            example:
+              tin: '12345678-0001'
+              relatedPersons:
+                - firstName: Chidi
+                  lastName: Okafor
+                  role: DIRECTOR_AND_SIGNATORY
+      responses:
+        '200':
+          description: Updated. The customer as they now are.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+        '409':
+          description: Another customer already has this BVN, NIN, TIN or mobile number (`CUSTOMER_EXISTS`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 
   /v1/customers/search:
     post:
@@ -681,15 +917,62 @@ paths:
         '404':
           $ref: '#/components/responses/CustomerNotFound'
 
+  /v1/customers/{clientId}/risk-profile:
+    put:
+      tags: [Customers]
+      operationId: setRiskProfile
+      summary: Set a customer's PEP status and risk rating
+      description: |
+        Records the result of the client's screening of the customer, for example after a review.
+        Both fields are optional; a field left out keeps its current value. Takes effect at once
+        for transaction monitoring.
+      security:
+        - bearerToken: []
+        - clientCredentials: [customers]
+      parameters:
+        - $ref: '#/components/parameters/ClientId'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetRiskProfileRequest'
+            example:
+              pep: true
+              riskRating: HIGH
+      responses:
+        '200':
+          description: Recorded.
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskProfile'
+              example:
+                clientId: 10
+                pep: true
+                riskRating: HIGH
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/CustomerNotFound'
+
   /v1/customers/{clientId}/transaction-limit:
     put:
       tags: [Customers]
       operationId: setTransactionLimit
-      summary: Set a customer's own daily and single transfer limits
+      summary: Set a customer's own daily transfer limit
       description: |
-        For the customer's account `accountNumber`. The limits can be lowered at any KYC level. A level 3
-        customer can also raise them, up to the ceiling for their customer type (individual or
-        business). Anything above the level's limits or the ceiling is refused with
+        One limit for the customer, applied across all their accounts. It can be lowered at any KYC
+        level. A level 3 customer can also raise it, up to the ceiling for their customer type
+        (individual or business). Anything above the level's limit or the ceiling is refused with
         `422 LIMIT_EXCEEDED`.
       security:
         - bearerToken: []
@@ -704,9 +987,7 @@ paths:
             schema:
               $ref: '#/components/schemas/SetTransactionLimitRequest'
             example:
-              accountNumber: '2000000158'
-              dailyTransactionLimit: '1000000.00'
-              singleTransactionLimit: '500000.00'
+              transactionLimit: '1000000.00'
       responses:
         '200':
           description: Limits set.
@@ -718,10 +999,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/SetTransactionLimitResponse'
               example:
-                savingsId: 158
-                accountNumber: '2000000158'
-                dailyTransactionLimit: '1000000.00'
-                singleTransactionLimit: '500000.00'
+                clientId: 10
+                transactionLimit: '1000000.00'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2328,25 +2607,21 @@ components:
       type: string
       enum: [PERSON, BUSINESS]
 
-    CreateCustomerRequest:
+    CreateIndividualRequest:
       type: object
-      required: [email, mobileNumber, bvn, address, productId, clientType]
+      required: [firstName, lastName, email, mobileNumber, bvn, address, productId, kycLevel]
       properties:
         firstName:
           type: string
-          description: Required for `PERSON`.
+          minLength: 1
         middleName:
           type: string
         lastName:
           type: string
-          description: Required for `PERSON`.
-        fullName:
-          type: string
-          description: Business name. Required for `BUSINESS`.
+          minLength: 1
         dateOfBirth:
           type: string
           format: date
-          description: Date of birth (person) or registration date (business).
           example: '1999-06-15'
         email:
           type: string
@@ -2356,22 +2631,90 @@ components:
           example: '08012345678'
         bvn:
           $ref: '#/components/schemas/Bvn'
+        nin:
+          $ref: '#/components/schemas/Nin'
+        tin:
+          $ref: '#/components/schemas/Tin'
         address:
-          type: string
+          $ref: '#/components/schemas/Address'
         productId:
           type: integer
           format: int64
           description: Product for the first account. See `GET /v1/products`.
-        clientType:
-          $ref: '#/components/schemas/ClientType'
+        kycLevel:
+          type: integer
+          minimum: 1
+          description: The KYC level (tier) the customer qualified for. See `PUT /v1/customers/{clientId}/kyc-level`.
+        transactionLimit:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          description: Optional. The customer's own daily transfer limit; see `PUT /v1/customers/{clientId}/transaction-limit`.
+        pep:
+          allOf:
+            - $ref: '#/components/schemas/Pep'
+        riskRating:
+          $ref: '#/components/schemas/CustomerRiskRating'
         transactionReference:
           allOf:
             - $ref: '#/components/schemas/TransactionReference'
           description: Optional. Send one to make a retry return the original result instead of `409 CUSTOMER_EXISTS`.
 
+    CreateBusinessRequest:
+      type: object
+      required: [businessName, email, mobileNumber, bvn, address, productId, kycLevel]
+      properties:
+        businessName:
+          type: string
+          minLength: 1
+          description: The registered business name.
+        registrationDate:
+          type: string
+          format: date
+          description: The date the business was registered.
+          example: '2019-03-01'
+        email:
+          type: string
+          format: email
+        mobileNumber:
+          type: string
+          example: '08012345678'
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        cacNumber:
+          $ref: '#/components/schemas/CacNumber'
+        tin:
+          $ref: '#/components/schemas/Tin'
+        address:
+          $ref: '#/components/schemas/Address'
+        productId:
+          type: integer
+          format: int64
+          description: Product for the first account. See `GET /v1/products`.
+        kycLevel:
+          type: integer
+          minimum: 1
+          description: The KYC level (tier) the customer qualified for. See `PUT /v1/customers/{clientId}/kyc-level`.
+        relatedPersons:
+          type: array
+          description: The business's directors and signatories. Optional.
+          items:
+            $ref: '#/components/schemas/RelatedPerson'
+        transactionLimit:
+          allOf:
+            - $ref: '#/components/schemas/Amount'
+          description: Optional. The customer's own daily transfer limit; see `PUT /v1/customers/{clientId}/transaction-limit`.
+        pep:
+          allOf:
+            - $ref: '#/components/schemas/Pep'
+        riskRating:
+          $ref: '#/components/schemas/CustomerRiskRating'
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: Optional. Send one to make a retry return the original result instead of `409 CUSTOMER_EXISTS`.
     CreateCustomerResponse:
       type: object
-      required: [accountNumber, id, clientId, productId]
+      required: [accountNumber, id, clientId, clientType, productId]
       properties:
         accountNumber:
           $ref: '#/components/schemas/AccountNumber'
@@ -2383,17 +2726,29 @@ components:
           type: integer
           format: int64
           description: The customer's ID. Keep it; customer calls use it.
+        clientType:
+          $ref: '#/components/schemas/ClientType'
         firstName:
           type: string
+          description: Individuals only.
         lastName:
           type: string
+          description: Individuals only.
+        businessName:
+          type: string
+          description: Businesses only.
         email:
           type: string
         address:
-          type: string
+          $ref: '#/components/schemas/Address'
         dateOfBirth:
           type: string
           format: date
+          description: Individuals only.
+        registrationDate:
+          type: string
+          format: date
+          description: Businesses only.
         mobileNumber:
           type: string
         productId:
@@ -2425,23 +2780,88 @@ components:
           $ref: '#/components/schemas/ClientType'
         firstName:
           type: string
+          description: Individuals only.
         middleName:
           type: string
+          description: Individuals only.
         lastName:
           type: string
-        fullName:
+          description: Individuals only.
+        businessName:
           type: string
+          description: Businesses only.
         email:
           type: string
         mobileNumber:
           type: string
+        dateOfBirth:
+          type: string
+          format: date
+          description: Individuals only.
+        registrationDate:
+          type: string
+          format: date
+          description: Businesses only.
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        nin:
+          $ref: '#/components/schemas/Nin'
+        cacNumber:
+          $ref: '#/components/schemas/CacNumber'
+        tin:
+          $ref: '#/components/schemas/Tin'
+        address:
+          $ref: '#/components/schemas/Address'
         kycLevel:
           type: integer
           minimum: 1
-          maximum: 4
+          description: A KYC level (tier) configured in the bank; 1 to 3 always exist.
+        pep:
+          $ref: '#/components/schemas/Pep'
+        riskRating:
+          $ref: '#/components/schemas/CustomerRiskRating'
+        transactionLimit:
+          $ref: '#/components/schemas/Money'
+        relatedPersons:
+          type: array
+          items:
+            $ref: '#/components/schemas/RelatedPerson'
         status:
           type: string
           enum: [ACTIVE, INACTIVE, CLOSED]
+
+    Pep:
+      type: boolean
+      description: |
+        Whether the customer is a politically exposed person, from the client's onboarding checks.
+        Optional; a PEP's transactions are monitored more strictly.
+
+    CustomerRiskRating:
+      type: string
+      description: The customer's risk rating from the client's onboarding checks. Optional.
+      enum: [LOW, MEDIUM, HIGH]
+
+    SetRiskProfileRequest:
+      type: object
+      minProperties: 1
+      description: Send either or both; a field left out keeps its current value.
+      properties:
+        pep:
+          $ref: '#/components/schemas/Pep'
+        riskRating:
+          $ref: '#/components/schemas/CustomerRiskRating'
+
+    RiskProfile:
+      type: object
+      required: [clientId]
+      properties:
+        clientId:
+          type: integer
+          format: int64
+        pep:
+          $ref: '#/components/schemas/Pep'
+        riskRating:
+          $ref: '#/components/schemas/CustomerRiskRating'
 
     SetKycLevelRequest:
       type: object
@@ -2450,7 +2870,7 @@ components:
         kycLevel:
           type: integer
           minimum: 1
-          maximum: 4
+          description: A KYC level (tier) configured in the bank; 1 to 3 always exist.
         clientId:
           type: integer
           format: int64
@@ -2466,32 +2886,184 @@ components:
         kycLevel:
           type: integer
           minimum: 1
-          maximum: 4
+          description: A KYC level (tier) configured in the bank; 1 to 3 always exist.
 
     SetTransactionLimitRequest:
       type: object
-      required: [accountNumber, dailyTransactionLimit, singleTransactionLimit]
+      required: [transactionLimit]
       properties:
-        accountNumber:
-          $ref: '#/components/schemas/AccountNumber'
-        dailyTransactionLimit:
-          $ref: '#/components/schemas/Amount'
-        singleTransactionLimit:
+        transactionLimit:
           $ref: '#/components/schemas/Amount'
 
     SetTransactionLimitResponse:
       type: object
-      required: [savingsId, accountNumber, dailyTransactionLimit, singleTransactionLimit]
+      required: [clientId, transactionLimit]
       properties:
-        savingsId:
+        clientId:
           type: integer
           format: int64
-        accountNumber:
-          $ref: '#/components/schemas/AccountNumber'
-        dailyTransactionLimit:
+        transactionLimit:
           $ref: '#/components/schemas/Money'
-        singleTransactionLimit:
-          $ref: '#/components/schemas/Money'
+
+    Address:
+      type: object
+      required: [addressLine1]
+      description: |
+        A customer's address. `state` and `country` are names, for example `Lagos` and `Nigeria`
+        (see the bank's lists); `country` defaults to `Nigeria`.
+      properties:
+        addressLine1:
+          type: string
+          maxLength: 500
+        addressLine2:
+          type: string
+          maxLength: 500
+        addressLine3:
+          type: string
+          maxLength: 500
+        street:
+          type: string
+          maxLength: 100
+        townVillage:
+          type: string
+          maxLength: 100
+        city:
+          type: string
+          maxLength: 100
+        district:
+          type: string
+          maxLength: 100
+          description: County or district, for example the local government area.
+        state:
+          type: string
+          example: Lagos
+        country:
+          type: string
+          example: Nigeria
+        postalCode:
+          type: string
+          maxLength: 10
+
+    Nin:
+      type: string
+      description: 11-digit National Identification Number.
+      pattern: '^\d{11}$'
+      example: '12345678901'
+
+    CacNumber:
+      type: string
+      description: The business's CAC registration number, for example `RC123456`. For businesses only.
+      pattern: '^[A-Za-z0-9/-]{1,20}$'
+      example: RC123456
+
+    Tin:
+      type: string
+      description: Tax Identification Number, for example `12345678-0001`.
+      pattern: '^[0-9][0-9-]{7,19}$'
+      example: 12345678-0001
+
+    RelatedPerson:
+      type: object
+      description: A director or signatory of a business customer.
+      required: [firstName, lastName, role]
+      properties:
+        firstName:
+          type: string
+          maxLength: 100
+        middleName:
+          type: string
+          maxLength: 100
+        lastName:
+          type: string
+          maxLength: 100
+        role:
+          type: string
+          enum: [DIRECTOR, SIGNATORY, DIRECTOR_AND_SIGNATORY]
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        nin:
+          $ref: '#/components/schemas/Nin'
+        dateOfBirth:
+          type: string
+          format: date
+        mobileNumber:
+          type: string
+          maxLength: 20
+        email:
+          type: string
+          format: email
+          maxLength: 100
+        address:
+          type: string
+          maxLength: 250
+        ownershipPercentage:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Share of the business the person owns, in percent.
+
+    UpdateIndividualRequest:
+      type: object
+      minProperties: 1
+      description: Send only the fields that change. `address` replaces the customer's address as a whole.
+      properties:
+        firstName:
+          type: string
+          minLength: 1
+        middleName:
+          type: string
+        lastName:
+          type: string
+          minLength: 1
+        dateOfBirth:
+          type: string
+          format: date
+        email:
+          type: string
+          format: email
+        mobileNumber:
+          type: string
+          minLength: 1
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        nin:
+          $ref: '#/components/schemas/Nin'
+        tin:
+          $ref: '#/components/schemas/Tin'
+        address:
+          $ref: '#/components/schemas/Address'
+
+    UpdateBusinessRequest:
+      type: object
+      minProperties: 1
+      description: |
+        Send only the fields that change. `address` replaces the business's address as a whole; `relatedPersons`,
+        when sent, replaces the whole list.
+      properties:
+        businessName:
+          type: string
+          minLength: 1
+        registrationDate:
+          type: string
+          format: date
+        email:
+          type: string
+          format: email
+        mobileNumber:
+          type: string
+          minLength: 1
+        bvn:
+          $ref: '#/components/schemas/Bvn'
+        cacNumber:
+          $ref: '#/components/schemas/CacNumber'
+        tin:
+          $ref: '#/components/schemas/Tin'
+        address:
+          $ref: '#/components/schemas/Address'
+        relatedPersons:
+          type: array
+          items:
+            $ref: '#/components/schemas/RelatedPerson'
 
     OpenAccountRequest:
       type: object
@@ -2504,6 +3076,10 @@ components:
           type: integer
           format: int64
           description: Optional; if sent, must match the path.
+        transactionReference:
+          allOf:
+            - $ref: '#/components/schemas/TransactionReference'
+          description: Optional. Send one to make a retry return the account first opened instead of opening another.
 
     Account:
       type: object
@@ -2542,7 +3118,7 @@ components:
         kycLevel:
           type: integer
           minimum: 1
-          maximum: 4
+          description: A KYC level (tier) configured in the bank; 1 to 3 always exist.
 
     Product:
       type: object
@@ -3226,11 +3802,10 @@ components:
         kycLevel:
           type: integer
           minimum: 1
-          maximum: 4
+          description: A KYC level (tier) configured in the bank; 1 to 3 always exist.
         previousKycLevel:
           type: integer
           minimum: 1
-          maximum: 4
           description: For `CustomerKycLevelChanged`.
 
     AccountOpenedEventData:

@@ -3,6 +3,7 @@ package com.oneutility.cba.bankingapi.auth.service;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.oneutility.cba.bankingapi.auth.dto.ClientCredentials;
 import com.oneutility.cba.bankingapi.auth.dto.IssuedToken;
+import com.oneutility.cba.bankingapi.common.logging.OutboundLoggingInterceptor;
 import com.oneutility.cba.bankingapi.common.security.AuthServiceProperties;
 import java.nio.charset.StandardCharsets;
 import org.slf4j.Logger;
@@ -11,6 +12,7 @@ import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.BufferingClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -33,7 +35,8 @@ public class AuthServiceClient {
         ClientHttpRequestFactorySettings timeouts = ClientHttpRequestFactorySettings.defaults()
                 .withConnectTimeout(authService.connectTimeout()).withReadTimeout(authService.readTimeout());
         this.http = builder.baseUrl(authService.tokenUrl().toString())
-                .requestFactory(ClientHttpRequestFactoryBuilder.detect().build(timeouts)).build();
+                .requestFactory(new BufferingClientHttpRequestFactory(ClientHttpRequestFactoryBuilder.detect().build(timeouts)))
+                .requestInterceptor(new OutboundLoggingInterceptor("auth-service")).build();
     }
 
     /**
