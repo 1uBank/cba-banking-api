@@ -65,5 +65,14 @@ banking-api:
     audience: banking-api
     connect-timeout: 3s
     read-timeout: 10s
+  core-banking:
+    base-url: ${BANKING_API_CORE_BANKING_URL}
+    tenant-id: ${BANKING_API_CORE_BANKING_TENANT:default}
+    token-url: ${BANKING_API_CORE_BANKING_TOKEN_URL}
+    client-id: ${BANKING_API_CORE_BANKING_CLIENT_ID:banking-api}
+    client-secret: ${BANKING_API_CORE_BANKING_CLIENT_SECRET}
+    office-id: ${BANKING_API_CORE_BANKING_OFFICE_ID:1}
+    connect-timeout: 3s
+    read-timeout: 30s
   problems:
     type-base-uri: ${BANKING_API_PROBLEM_TYPE_BASE_URI:https://docs.cba.1ubank.example/problems/}

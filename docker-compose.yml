@@ -31,6 +31,11 @@ services:
       # The local auth service has no fixed hostname (KC_HOSTNAME), so tokens name it by the address this
       # container calls it on. On AWS, KC_HOSTNAME is set and this is the auth service's public address.
       BANKING_API_AUTH_ISSUER: http://host.docker.internal:8180/realms/clients
+      # CBA-CORE, called with the Banking API's own token from the cba realm. CBA-CORE must trust the issuer
+      # this container's tokens carry (http://host.docker.internal:8180/realms/cba).
+      BANKING_API_CORE_BANKING_URL: http://host.docker.internal:8080/fineract-provider/api/v1
+      BANKING_API_CORE_BANKING_TOKEN_URL: http://host.docker.internal:8180/realms/cba/protocol/openid-connect/token
+      BANKING_API_CORE_BANKING_CLIENT_SECRET: ${BANKING_API_CORE_BANKING_CLIENT_SECRET}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

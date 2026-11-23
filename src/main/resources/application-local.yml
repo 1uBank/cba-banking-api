@@ -10,6 +10,9 @@ banking-api:
     token-url: ${BANKING_API_AUTH_TOKEN_URL:http://localhost:8180/realms/clients/protocol/openid-connect/token}
     jwk-set-uri: ${BANKING_API_AUTH_JWK_SET_URI:http://localhost:8180/realms/clients/protocol/openid-connect/certs}
     issuer: ${BANKING_API_AUTH_ISSUER:http://localhost:8180/realms/clients}
+  core-banking:
+    base-url: ${BANKING_API_CORE_BANKING_URL:http://localhost:8080/fineract-provider/api/v1}
+    token-url: ${BANKING_API_CORE_BANKING_TOKEN_URL:http://localhost:8180/realms/cba/protocol/openid-connect/token}
 
 logging:
   structured:

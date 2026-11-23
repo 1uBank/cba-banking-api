@@ -67,7 +67,10 @@ docker compose up -d banking-api-db
 BANKING_API_DB_PASSWORD=<value from .env> ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-The `local` profile points at `localhost:5434` and `localhost:8180`, and logs as plain text.
+The `local` profile points at `localhost:5434`, the auth service on `localhost:8180` and CBA-CORE on `localhost:8080`,
+and logs as plain text. It also needs `BANKING_API_CORE_BANKING_CLIENT_SECRET`: `BANKING_API_CLIENT_SECRET` in
+`cba-auth/.env`. CBA-CORE must trust the auth service's `cba` realm (as `local-oidc` sets it up) and have the 1UBank
+customer data, which its migrations add.
 
 Get a token as the App (its secret is `APP_CLIENT_SECRET` in `cba-auth/.env`):
 
@@ -118,7 +121,7 @@ The settings below reach the same auth service by two different addresses:
 | Example | `https://auth.dev.cba.1ubank.com` | `http://cba-auth.internal:8080` |
 | What it is | Its public name, through the load balancer, with TLS. The value of `KC_HOSTNAME` in cba-auth | Its private address inside the AWS network, straight to the container (for example its service-discovery name) |
 | Reachable from the internet | Yes, apart from `/admin` | No |
-| Used here for | `BANKING_API_AUTH_ISSUER` only | `BANKING_API_AUTH_TOKEN_URL` and `BANKING_API_AUTH_JWK_SET_URI` |
+| Used here for | `BANKING_API_AUTH_ISSUER` only | `BANKING_API_AUTH_TOKEN_URL`, `BANKING_API_AUTH_JWK_SET_URI` and `BANKING_API_CORE_BANKING_TOKEN_URL` |
 
 The Banking API calls the auth service on its internal address: it is faster and never leaves the private network. It
 checks every token against the public name, because the auth service writes that name into each token as its issuer,
@@ -136,6 +139,9 @@ Required (the service does not start without them):
 | `BANKING_API_AUTH_TOKEN_URL` | `http://<auth service's internal address>/realms/clients/protocol/openid-connect/token` |
 | `BANKING_API_AUTH_JWK_SET_URI` | `http://<auth service's internal address>/realms/clients/protocol/openid-connect/certs` |
 | `BANKING_API_AUTH_ISSUER` | `https://<auth-domain>/realms/clients` (see "The auth service's two addresses") |
+| `BANKING_API_CORE_BANKING_URL` | `http://<CBA-CORE's internal address>/fineract-provider/api/v1` |
+| `BANKING_API_CORE_BANKING_TOKEN_URL` | `http://<auth service's internal address>/realms/cba/protocol/openid-connect/token`: where the Banking API gets its own token for calling CBA-CORE (as `service-account-banking-api`) |
+| `BANKING_API_CORE_BANKING_CLIENT_SECRET` | Secret, from the secrets manager: the `banking-api` client's secret in the auth service's `cba` realm |
 
 Optional:
 
@@ -144,4 +150,7 @@ Optional:
 | `BANKING_API_DB_POOL_SIZE` | `10` | Database connections per instance |
 | `BANKING_API_LOG_FORMAT` | `ecs` | Log format: JSON (Elastic Common Schema) |
 | `BANKING_API_PROBLEM_TYPE_BASE_URI` | `https://docs.cba.1ubank.example/problems/` | Base of the `type` URI in error responses |
+| `BANKING_API_CORE_BANKING_CLIENT_ID` | `banking-api` | The Banking API's client in the `cba` realm |
+| `BANKING_API_CORE_BANKING_TENANT` | `default` | The CBA-CORE tenant |
+| `BANKING_API_CORE_BANKING_OFFICE_ID` | `1` | The CBA-CORE office new customers are created in |
 

@@ -3,6 +3,10 @@ banking-api:
     token-url: http://localhost:1/realms/clients/protocol/openid-connect/token
     jwk-set-uri: http://localhost:1/realms/clients/protocol/openid-connect/certs
     issuer: http://localhost:1/realms/clients
+  core-banking:
+    base-url: http://localhost:1/fineract-provider/api/v1
+    token-url: http://localhost:1/realms/cba/protocol/openid-connect/token
+    client-secret: test-only
 
 management:
   server:
