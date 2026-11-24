@@ -74,5 +74,8 @@ banking-api:
     office-id: ${BANKING_API_CORE_BANKING_OFFICE_ID:1}
     connect-timeout: 3s
     read-timeout: 30s
+    # Other CBA-CORE users whose holds and blocks clients may release or lift (comma-separated), e.g. the user
+    # TransactionPoint's API holds are migrated as. The Banking API's own service account always counts.
+    client-placed-by: ${BANKING_API_CORE_BANKING_CLIENT_PLACED_BY:}
   problems:
     type-base-uri: ${BANKING_API_PROBLEM_TYPE_BASE_URI:https://docs.cba.1ubank.example/problems/}

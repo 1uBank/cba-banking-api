@@ -153,4 +153,5 @@ Optional:
 | `BANKING_API_CORE_BANKING_CLIENT_ID` | `banking-api` | The Banking API's client in the `cba` realm |
 | `BANKING_API_CORE_BANKING_TENANT` | `default` | The CBA-CORE tenant |
 | `BANKING_API_CORE_BANKING_OFFICE_ID` | `1` | The CBA-CORE office new customers are created in |
+| `BANKING_API_CORE_BANKING_CLIENT_PLACED_BY` | (none) | Other CBA-CORE users whose holds and blocks clients may release or lift, comma-separated: for example the user TransactionPoint's API holds are migrated as. Holds and blocks the Banking API placed always count; any other is the bank's |
 

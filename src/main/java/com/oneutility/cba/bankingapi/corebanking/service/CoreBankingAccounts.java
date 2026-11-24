@@ -10,6 +10,15 @@ import com.oneutility.cba.bankingapi.corebanking.fineract.SavingsStatus;
 import com.oneutility.cba.bankingapi.corebanking.fineract.SavingsSubStatus;
 import com.oneutility.cba.bankingapi.corebanking.fineract.SearchHit;
 import java.math.BigDecimal;
+import java.time.ZoneId;
+import java.time.LocalDate;
+import com.oneutility.cba.bankingapi.corebanking.fineract.HoldResponse;
+import com.oneutility.cba.bankingapi.corebanking.fineract.HoldAmountCommand;
+import com.oneutility.cba.bankingapi.corebanking.fineract.AccountCommand;
+import com.oneutility.cba.bankingapi.corebanking.fineract.BlocksResponse;
+import com.oneutility.cba.bankingapi.corebanking.dto.CoreHold;
+import com.oneutility.cba.bankingapi.corebanking.dto.CoreBlock;
+import com.oneutility.cba.bankingapi.corebanking.dto.CoreBlockSide;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -19,10 +28,14 @@ import org.springframework.stereotype.Service;
 @Service
 public class CoreBankingAccounts {
 
-    private final FineractApi api;
+    private static final ZoneId BANK_ZONE = ZoneId.of("Africa/Lagos");
 
-    CoreBankingAccounts(FineractApi api) {
+    private final FineractApi api;
+    private final CoreBankingProperties properties;
+
+    CoreBankingAccounts(FineractApi api, CoreBankingProperties properties) {
         this.api = api;
+        this.properties = properties;
     }
 
     /** The account's number as customers know it: its NUBAN, which CBA-CORE issues as the account number. */
@@ -60,10 +73,113 @@ public class CoreBankingAccounts {
         return api.openAccount(clientId, new OpenAccountCommand(productId), idempotencyKey).savingsId();
     }
 
-    /** The savings products accounts can be opened on. */
+    // Holds
+
+    /**
+     * Holds {@code amount} on the account. The reference is stored on the hold, so a resend with the same reference
+     * returns the first hold instead of placing another.
+     *
+     * @return the hold
+     * @throws CoreBankingException when CBA-CORE refuses, for example an account that is not active
+     */
+    public CoreHold placeHold(long savingsId, BigDecimal amount, String reason, String transactionReference) {
+        api.holdAmount(savingsId, HoldAmountCommand.of(amount, LocalDate.now(BANK_ZONE).toString(), reason,
+                transactionReference), transactionReference);
+        return findHold(transactionReference).orElseThrow(
+                () -> new IllegalStateException("CBA-CORE placed a hold but cannot find it by its reference"));
+    }
+
+    /** The hold placed with this reference, if any. */
+    public Optional<CoreHold> findHold(String transactionReference) {
+        return notFoundAsEmpty(() -> hold(api.findHoldByReference(transactionReference)));
+    }
+
+    /** The hold with this transaction ID on this account, if any. */
+    public Optional<CoreHold> findHold(long savingsId, long holdTransactionId) {
+        return notFoundAsEmpty(() -> hold(api.findHoldByTransaction(savingsId, holdTransactionId)));
+    }
+
+    /** Releases the hold; the caller checks it is not already released. */
+    public void releaseHold(long savingsId, long holdTransactionId) {
+        api.releaseAmount(savingsId, holdTransactionId, AccountCommand.empty());
+    }
+
+    // Blocks
+
+    /** Adds {@code wanted} to what is blocked on the account; what is already blocked stays as it is. */
+    public void block(long savingsId, CoreBlock wanted, String reason) {
+        CoreBlock current = account(savingsId).block();
+        boolean debit = wanted.debit() && !current.debit();
+        boolean credit = wanted.credit() && !current.credit();
+        if (debit && credit) {
+            command(savingsId, "block", AccountCommand.withReason(reason));
+        } else if (debit) {
+            command(savingsId, "blockDebit", AccountCommand.withReason(reason));
+        } else if (credit) {
+            command(savingsId, "blockCredit", AccountCommand.withReason(reason));
+        }
+    }
+
+    /** Lifts {@code type} from what is blocked on the account; the rest stays blocked. */
+    public void unblock(long savingsId, CoreBlock type) {
+        CoreBlock current = account(savingsId).block();
+        boolean debit = type.debit() && current.debit();
+        boolean credit = type.credit() && current.credit();
+        if (debit && credit) {
+            command(savingsId, "unblock", AccountCommand.empty());
+        } else if (debit) {
+            command(savingsId, "unblockDebit", AccountCommand.empty());
+        } else if (credit) {
+            command(savingsId, "unblockCredit", AccountCommand.empty());
+        }
+    }
+
+    /** Each blocked side of the account, with who placed it; empty when nothing is blocked. */
+    public java.util.List<CoreBlockSide> blockSides(long savingsId) {
+        BlocksResponse blocks = api.getBlocks(savingsId);
+        java.util.List<CoreBlockSide> sides = new java.util.ArrayList<>();
+        side(sides, "CREDIT", blocks.credit());
+        side(sides, "DEBIT", blocks.debit());
+        return sides;
+    }
+
+    private void side(java.util.List<CoreBlockSide> sides, String type, BlocksResponse.Side side) {
+        if (side != null && side.blocked()) {
+            sides.add(new CoreBlockSide(type, properties.placedByClient(side.placedBy()), side.reason(), side.placedOn()));
+        }
+    }
+
+    private void command(long savingsId, String command, AccountCommand body) {
+        api.savingsAccountCommand(savingsId, command, body);
+    }
+
+    private CoreHold hold(HoldResponse h) {
+        return new CoreHold(h.holdTransactionId(), h.savingsId(), h.accountNo(), h.clientId() == null ? 0 : h.clientId(),
+                h.amount(), h.reason(), h.transactionReference(), h.createdOn(), h.released(), h.releasedOn(), h.reversed(),
+                properties.placedByClient(h.placedBy()));
+    }
+
+    private static <T> Optional<T> notFoundAsEmpty(java.util.function.Supplier<T> call) {
+        try {
+            return Optional.of(call.get());
+        } catch (CoreBankingException e) {
+            if (e.isNotFound()) {
+                return Optional.empty();
+            }
+            throw e;
+        }
+    }
+
+    /** The IDs of the products static virtual accounts are opened on. */
+    public java.util.Set<Long> virtualAccountProductIds() {
+        return products().stream().filter(CoreProduct::forVirtualAccounts).map(CoreProduct::id)
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    /** Every savings product, those for virtual accounts included. */
     public List<CoreProduct> products() {
         return api.getSavingsProducts().stream()
-                .map(p -> new CoreProduct(p.id(), p.name(), p.shortName(), p.description())).toList();
+                .map(p -> new CoreProduct(p.id(), p.name(), p.shortName(), p.description(), p.virtualAccountType())).toList();
     }
 
     private static CoreAccount account(SavingsAccountResponse a) {
@@ -71,7 +187,13 @@ public class CoreBankingAccounts {
                 a.savingsProductId() == null ? 0 : a.savingsProductId(), a.savingsProductName(),
                 status(a.status(), a.subStatus()), a.currency() == null ? null : a.currency().code(),
                 a.summary() == null ? BigDecimal.ZERO : zeroIfNull(a.summary().accountBalance()),
-                a.summary() == null ? BigDecimal.ZERO : zeroIfNull(a.summary().availableBalance()));
+                a.summary() == null ? BigDecimal.ZERO : zeroIfNull(a.summary().availableBalance()), block(a.subStatus()),
+                block(a.subStatus()) == CoreBlock.NONE ? null : a.reasonForBlock());
+    }
+
+    private static CoreBlock block(SavingsSubStatus subStatus) {
+        return subStatus == null ? CoreBlock.NONE
+                : CoreBlock.of(subStatus.block() || subStatus.blockDebit(), subStatus.block() || subStatus.blockCredit());
     }
 
     static CoreAccountStatus status(SavingsStatus status, SavingsSubStatus subStatus) {

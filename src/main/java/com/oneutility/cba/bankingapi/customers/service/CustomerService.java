@@ -110,6 +110,10 @@ public class CustomerService {
     }
 
     private CreatedCustomer create(NewCustomer customer) {
+        if (call(accounts::virtualAccountProductIds).contains(customer.productId())) {
+            throw new ApiException(ErrorCode.VALIDATION_FAILED, "This product is for virtual accounts; use /v1/virtual-accounts",
+                    List.of(new FieldViolation("productId", "is a virtual account product")));
+        }
         try {
             return customers.create(customer);
         } catch (CoreBankingException e) {

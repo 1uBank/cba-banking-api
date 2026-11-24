@@ -1,6 +1,9 @@
 package com.oneutility.cba.bankingapi.accounts.controller;
 
 import com.oneutility.cba.bankingapi.accounts.dto.Account;
+import com.oneutility.cba.bankingapi.accounts.dto.AccountBlocks;
+import com.oneutility.cba.bankingapi.accounts.dto.BlockType;
+import com.oneutility.cba.bankingapi.accounts.dto.PlaceBlockRequest;
 import com.oneutility.cba.bankingapi.accounts.dto.AccountPage;
 import com.oneutility.cba.bankingapi.accounts.dto.AccountSearchRequest;
 import com.oneutility.cba.bankingapi.accounts.dto.OpenAccountRequest;
@@ -47,6 +50,22 @@ class AccountController {
     @GetMapping("/accounts/{accountNumber}")
     Account get(@PathVariable String accountNumber) {
         return accounts.get(accountNumber);
+    }
+
+    @PostMapping(path = "/accounts/{accountNumber}/blocks", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @ResponseStatus(HttpStatus.CREATED)
+    AccountBlocks block(@PathVariable String accountNumber, @Valid @RequestBody PlaceBlockRequest request) {
+        return accounts.block(accountNumber, request);
+    }
+
+    @GetMapping("/accounts/{accountNumber}/blocks")
+    AccountBlocks blocks(@PathVariable String accountNumber) {
+        return accounts.blocks(accountNumber);
+    }
+
+    @PostMapping("/accounts/{accountNumber}/blocks/{type}/lift")
+    AccountBlocks lift(@PathVariable String accountNumber, @PathVariable BlockType type) {
+        return accounts.lift(accountNumber, type);
     }
 
     @PostMapping(path = "/accounts/search", consumes = MediaType.APPLICATION_JSON_VALUE)

@@ -6,5 +6,5 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SavingsAccountResponse(long id, String accountNo, Long clientId, String clientName,
         Long savingsProductId, String savingsProductName, SavingsStatus status, SavingsSubStatus subStatus,
-        CurrencyResponse currency, SavingsSummary summary) {
+        CurrencyResponse currency, SavingsSummary summary, String reasonForBlock) {
 }

@@ -208,6 +208,19 @@ class AccountEndpointsIT {
     }
 
     @Test
+    void virtualAccountProductsAreOnlyForVirtualAccounts() throws Exception {
+        long clientId = customer("22200000306", "08000000306");
+
+        send(post("/v1/customers/{id}/accounts", clientId), "{\"productId\":4}")
+                .andExpect(status().isBadRequest()).andExpect(openApi().isValid(CONTRACT))
+                .andExpect(jsonPath("$.errors[0].field").value("productId"));
+        send(post("/v1/individual-customers"), """
+                {"firstName":"Ada","lastName":"Obi","email":"ada.va@example.com","mobileNumber":"08000000307","bvn":"22200000307",
+                 "address":{"addressLine1":"12 Allen Avenue","state":"Lagos"},"productId":5,"kycLevel":1}""")
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.errors[0].field").value("productId"));
+    }
+
+    @Test
     void listsProducts() throws Exception {
         mvc.perform(get("/v1/products").with(app()))
                 .andExpect(status().isOk()).andExpect(openApi().isValid(CONTRACT))
