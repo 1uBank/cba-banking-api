@@ -1,6 +1,10 @@
 package com.oneutility.cba.bankingapi.accounts.service;
 
 import com.oneutility.cba.bankingapi.accounts.dto.Account;
+import com.oneutility.cba.bankingapi.corebanking.dto.CoreBlock;
+import com.oneutility.cba.bankingapi.accounts.dto.PlaceBlockRequest;
+import com.oneutility.cba.bankingapi.accounts.dto.BlockType;
+import com.oneutility.cba.bankingapi.accounts.dto.AccountBlocks;
 import com.oneutility.cba.bankingapi.accounts.dto.AccountPage;
 import com.oneutility.cba.bankingapi.accounts.dto.AccountType;
 import com.oneutility.cba.bankingapi.accounts.dto.OpenAccountRequest;
@@ -82,6 +86,66 @@ public class AccountService {
             throw accountNotFound();
         }
         return account(account, call(() -> customers.kycLevel(account.clientId())).orElse(1));
+    }
+
+    /**
+     * The account with this number, if it belongs to one of the client's customers and is open; otherwise
+     * {@code ACCOUNT_NOT_FOUND}. For other modules acting on an account.
+     */
+    public CoreAccount requireOwned(String accountNumber) {
+        CoreAccount account = owned(accountNumber).orElseThrow(AccountService::accountNotFound);
+        if (account.status() == CoreAccountStatus.CLOSED) {
+            throw accountNotFound();
+        }
+        return account;
+    }
+
+    // Blocks
+
+    public AccountBlocks blocks(String accountNumber) {
+        return blocks(requireOwned(accountNumber));
+    }
+
+    public AccountBlocks block(String accountNumber, PlaceBlockRequest request) {
+        CoreAccount account = requireOwned(accountNumber);
+        try {
+            accounts.block(account.savingsId(), CoreBlock.valueOf(request.type().name()), request.reason().trim());
+        } catch (CoreBankingException e) {
+            throw refusedOnAccount(e);
+        }
+        return blocks(call(() -> accounts.account(account.savingsId())));
+    }
+
+    public AccountBlocks lift(String accountNumber, BlockType type) {
+        CoreAccount account = requireOwned(accountNumber);
+        try {
+            accounts.unblock(account.savingsId(), CoreBlock.valueOf(type.name()));
+        } catch (CoreBankingException e) {
+            throw refusedOnAccount(e);
+        }
+        return blocks(call(() -> accounts.account(account.savingsId())));
+    }
+
+    private static AccountBlocks blocks(CoreAccount account) {
+        return new AccountBlocks(account.accountNumber(), account.block().name(), account.blockReason());
+    }
+
+    /**
+     * A refusal by CBA-CORE of something done to an account (a block, a hold), as the contract's errors: an account
+     * that is not active, or a balance too low, are business rules ({@code 422}).
+     */
+    public static ApiException refusedOnAccount(CoreBankingException e) {
+        if (e.codes().stream().anyMatch(code -> code.contains("insufficient") || code.contains("balance"))) {
+            return new ApiException(ErrorCode.INSUFFICIENT_FUNDS, "The account's available balance is too low");
+        }
+        if (e.codes().stream().anyMatch(code -> code.contains("not.active") || code.contains("account.is.not.active"))) {
+            return new ApiException(ErrorCode.ACCOUNT_NOT_ACTIVE, "The account is not active");
+        }
+        if (e.status() == 403) {
+            return new ApiException(ErrorCode.ACCOUNT_RESTRICTED,
+                    "The core ledger refused: " + e.getMessage().replaceFirst("^CBA-CORE answered \\d+: ", ""));
+        }
+        return upstream(e);
     }
 
     public AccountPage searchByBvn(String bvn, Integer limit, String cursor) {
@@ -210,7 +274,7 @@ public class AccountService {
         }
     }
 
-    static ApiException upstream(CoreBankingException e) {
+    public static ApiException upstream(CoreBankingException e) {
         return switch (e.kind()) {
             case UNAVAILABLE -> new ApiException(ErrorCode.UPSTREAM_UNAVAILABLE, "The core ledger could not be reached");
             case TIMEOUT -> new ApiException(ErrorCode.UPSTREAM_TIMEOUT, "The core ledger did not answer in time");

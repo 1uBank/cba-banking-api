@@ -42,12 +42,18 @@ public final class FakeCoreBanking implements AutoCloseable {
     private final Map<Long, ArrayNode> identifiers = new LinkedHashMap<>();
     private final Map<String, Map<Long, ArrayNode>> datatables = new LinkedHashMap<>();
     private final Map<String, JsonNode> idempotent = new LinkedHashMap<>();
+    /** Holds by transaction ID. */
+    private final Map<Long, ObjectNode> holds = new LinkedHashMap<>();
     private volatile boolean down;
     /** The current request's decoded query string (handle is synchronized). */
     private String query = "";
-    /** Savings products: id → name, NUBAN prefix. */
+    /** Savings products: id → name, NUBAN prefix, virtual account type (or null). */
     private final Map<Long, String[]> products = new LinkedHashMap<>(Map.of(1L,
-            new String[] { "Individual Savings", "002" }, 3L, new String[] { "Current Account", "005" }));
+            new String[] { "Individual Savings", "002", null }, 3L, new String[] { "Current Account", "005", null }, 4L,
+            new String[] { "Smart Transfer Account", "600", "SMART_TRANSFER" }, 5L,
+            new String[] { "Virtual Accounts", "555", "AIRTIME" }));
+    /** Virtual accounts by savings ID. */
+    private final Map<Long, ObjectNode> virtualAccounts = new LinkedHashMap<>();
 
     public FakeCoreBanking() throws IOException {
         code("Customer Identifier", "Passport", "BVN", "NIN", "CAC Registration Number", "TIN");
@@ -264,6 +270,23 @@ public final class FakeCoreBanking implements AutoCloseable {
         if ((m = Pattern.compile("/clients/(\\d+)/identifiers").matcher(api)).matches()) {
             return ok(identifiers.getOrDefault(Long.parseLong(m.group(1)), JSON.createArrayNode()));
         }
+        if (method.equals("POST") && (m = Pattern.compile("/savingsaccounts/(\\d+)/transactions").matcher(api)).matches()
+                && query.equals("command=holdAmount")) {
+            return holdAmount(Long.parseLong(m.group(1)), body);
+        }
+        if (method.equals("POST") && (m = Pattern.compile("/savingsaccounts/(\\d+)/transactions/(\\d+)").matcher(api)).matches()
+                && query.equals("command=releaseAmount")) {
+            return releaseAmount(Long.parseLong(m.group(1)), Long.parseLong(m.group(2)));
+        }
+        if (method.equals("POST") && (m = Pattern.compile("/savingsaccounts/(\\d+)").matcher(api)).matches()) {
+            return blockCommand(Long.parseLong(m.group(1)), query.replace("command=", ""), body);
+        }
+        if (api.startsWith("/oneubank/virtual-accounts")) {
+            return virtualAccountRoute(method, api, body, idempotencyKey);
+        }
+        if (method.equals("GET") && api.equals("/oneubank/holds")) {
+            return findHold();
+        }
         if ((m = Pattern.compile("/savingsaccounts/(\\d+)").matcher(api)).matches()) {
             ObjectNode account = savings.get(Long.parseLong(m.group(1)));
             return account == null ? new Object[] { 404, error(404, "error.msg.saving.account.id.invalid", "No account") }
@@ -450,6 +473,202 @@ public final class FakeCoreBanking implements AutoCloseable {
             datatables.computeIfAbsent(table.path("registeredTableName").asText(), t -> new LinkedHashMap<>()).put(clientId, rows);
         }
         return ok(JSON.createObjectNode().put("clientId", clientId).put("resourceId", clientId));
+    }
+
+    private Object[] holdAmount(long savingsId, JsonNode body) {
+        Object[] refused = unsupported(body, Set.of("transactionAmount", "transactionDate", "reasonForBlock", "externalId",
+                "locale", "dateFormat"));
+        if (refused != null) {
+            return refused;
+        }
+        ObjectNode account = savings.get(savingsId);
+        if (!account.path("status").path("active").asBoolean()) {
+            return new Object[] { 403, error(403, "error.msg.savingsaccount.transaction.account.is.not.active", "Account is not active") };
+        }
+        java.math.BigDecimal amount = new java.math.BigDecimal(body.path("transactionAmount").asText());
+        ObjectNode summary = (ObjectNode) account.get("summary");
+        java.math.BigDecimal available = summary.path("availableBalance").decimalValue();
+        if (amount.compareTo(available) > 0) {
+            return new Object[] { 403, error(403, "error.msg.savingsaccount.transaction.insufficient.account.balance",
+                    "Insufficient account balance") };
+        }
+        String reference = body.path("externalId").asText(null);
+        if (reference != null && holds.values().stream().anyMatch(h -> reference.equals(h.path("transactionReference").asText(null)))) {
+            return new Object[] { 403, error(403, "error.msg.savings.transaction.external.id.duplicate", "Duplicate external id") };
+        }
+        long id = ids.incrementAndGet();
+        holds.put(id, JSON.createObjectNode().put("holdTransactionId", id).put("savingsId", savingsId)
+                .put("accountNo", account.path("accountNo").asText()).put("clientId", account.path("clientId").asLong())
+                .put("amount", amount).put("reason", body.path("reasonForBlock").asText())
+                .put("transactionReference", reference).put("createdOn", "2026-11-23T09:15:00Z").put("released", false)
+                .put("reversed", false));
+        summary.put("availableBalance", available.subtract(amount));
+        return ok(JSON.createObjectNode().put("savingsId", savingsId).put("resourceId", id));
+    }
+
+    private Object[] releaseAmount(long savingsId, long holdId) {
+        ObjectNode hold = holds.get(holdId);
+        if (hold == null || hold.path("savingsId").asLong() != savingsId) {
+            return new Object[] { 404, error(404, "error.msg.saving.account.trasaction.id.invalid", "No such transaction") };
+        }
+        if (hold.path("released").asBoolean()) {
+            return new Object[] { 403, error(403, "error.msg.saving.account.transaction.release.already", "Already released") };
+        }
+        long id = ids.incrementAndGet();
+        hold.put("released", true).put("releaseTransactionId", id).put("releasedOn", "2026-11-23T10:00:00Z");
+        ObjectNode summary = (ObjectNode) savings.get(savingsId).get("summary");
+        summary.put("availableBalance", summary.path("availableBalance").decimalValue().add(hold.path("amount").decimalValue()));
+        return ok(JSON.createObjectNode().put("savingsId", savingsId).put("resourceId", id));
+    }
+
+    /** Fineract's block commands: the debit and credit blocks combine, and repeating one is refused. */
+    private Object[] blockCommand(long savingsId, String command, JsonNode body) {
+        ObjectNode account = savings.get(savingsId);
+        ObjectNode sub = (ObjectNode) account.get("subStatus");
+        boolean debit = sub.path("block").asBoolean() || sub.path("blockDebit").asBoolean();
+        boolean credit = sub.path("block").asBoolean() || sub.path("blockCredit").asBoolean();
+        boolean blocking = command.startsWith("block");
+        boolean wantDebit = !command.endsWith("Credit");
+        boolean wantCredit = !command.endsWith("Debit");
+        if (blocking && (wantDebit && debit && (!wantCredit || credit) || wantCredit && credit && !wantDebit)
+                || !blocking && (wantDebit && !wantCredit && !debit || wantCredit && !wantDebit && !credit || wantDebit && wantCredit && !(debit && credit))) {
+            return new Object[] { 400, error(400, "validation.msg.savingsaccount.substatus.currently.set", "Already in that state") };
+        }
+        if (blocking && (body == null || body.path("reasonForBlock").asText("").isBlank())) {
+            return new Object[] { 400, error(400, "validation.msg.savingsaccount.reasonForBlock.cannot.be.blank", "Reason is mandatory") };
+        }
+        boolean newDebit = blocking ? debit || wantDebit : debit && !wantDebit;
+        boolean newCredit = blocking ? credit || wantCredit : credit && !wantCredit;
+        sub.put("block", newDebit && newCredit).put("blockDebit", newDebit && !newCredit).put("blockCredit", newCredit && !newDebit);
+        if (blocking) {
+            account.put("reasonForBlock", body.path("reasonForBlock").asText());
+        }
+        return ok(JSON.createObjectNode().put("savingsId", savingsId).put("resourceId", savingsId));
+    }
+
+    private Object[] findHold() {
+        String reference = query.replaceAll(".*(?:^|&)transactionReference=([^&]*).*", "$1");
+        java.util.Optional<ObjectNode> hold = query.contains("transactionReference=")
+                ? holds.values().stream().filter(h -> reference.equals(h.path("transactionReference").asText(null))).findFirst()
+                : java.util.Optional.ofNullable(holds.get(Long.parseLong(query.replaceAll(".*transactionId=(\\d+).*", "$1"))))
+                        .filter(h -> h.path("savingsId").asLong() == Long.parseLong(query.replaceAll(".*savingsId=(\\d+).*", "$1")));
+        return hold.<Object[]>map(FakeCoreBanking::ok)
+                .orElseGet(() -> new Object[] { 404, error(404, "error.msg.oneubank.hold.not.found", "No such hold") });
+    }
+
+    private Object[] virtualAccountRoute(String method, String api, JsonNode body, String idempotencyKey) {
+        Matcher m;
+        if (method.equals("POST") && api.equals("/oneubank/virtual-accounts")) {
+            if (idempotencyKey != null && idempotent.containsKey(idempotencyKey)) {
+                return ok(idempotent.get(idempotencyKey));
+            }
+            Object[] refused = unsupported(body, Set.of("parentAccountNumber", "type", "label", "accountNumber", "transactionReference"));
+            if (refused != null) {
+                return refused;
+            }
+            ObjectNode parent = savings.values().stream()
+                    .filter(a -> a.path("accountNo").asText().equals(body.path("parentAccountNumber").asText())).findFirst().orElse(null);
+            if (parent == null || !parent.path("status").path("active").asBoolean()) {
+                return new Object[] { 403, error(403, "error.msg.oneubank.virtualaccount.parent.not.active", "Parent not active") };
+            }
+            String type = body.path("type").asText();
+            Long productId = products.entrySet().stream().filter(p -> type.equals(p.getValue()[2])).map(Map.Entry::getKey)
+                    .findFirst().orElse(null);
+            if (productId == null) {
+                return new Object[] { 403, error(403, "error.msg.oneubank.virtualaccount.type.unavailable", "No product for " + type) };
+            }
+            String number = body.path("accountNumber").asText(null);
+            if (number != null && savings.values().stream().anyMatch(a -> number.equals(a.path("accountNo").asText()))) {
+                return new Object[] { 403, error(403, "error.msg.savingsaccount.duplicate.accountNo", "Account number in use") };
+            }
+            long savingsId = ids.incrementAndGet();
+            long clientId = parent.path("clientId").asLong();
+            ObjectNode account = newAccount(savingsId, clientId, productId);
+            if (number != null) {
+                account.put("accountNo", number);
+            }
+            virtualAccounts.put(savingsId, JSON.createObjectNode().put("savingsId", savingsId)
+                    .put("accountNumber", account.path("accountNo").asText())
+                    .put("name", account.path("clientName").asText() + " - " + body.path("label").asText())
+                    .put("label", body.path("label").asText()).put("type", type).put("parentSavingsId", parent.path("id").asLong())
+                    .put("parentAccountNumber", parent.path("accountNo").asText()).put("clientId", clientId).put("status", "ACTIVE")
+                    .put("transactionReference", body.path("transactionReference").asText(null))
+                    .put("createdOn", "2026-11-23T09:00:00Z").put("updatedOn", "2026-11-23T09:00:00Z"));
+            ObjectNode result = JSON.createObjectNode().put("savingsId", savingsId).put("clientId", clientId).put("resourceId", savingsId);
+            if (idempotencyKey != null) {
+                idempotent.put(idempotencyKey, result);
+            }
+            return ok(result);
+        }
+        if (method.equals("PUT") && (m = Pattern.compile("/oneubank/virtual-accounts/(\\d+)").matcher(api)).matches()) {
+            ObjectNode va = virtualAccounts.get(Long.parseLong(m.group(1)));
+            if ("CLOSED".equals(va.path("status").asText())) {
+                return new Object[] { 403, error(403, "error.msg.oneubank.virtualaccount.closed", "Closed") };
+            }
+            String owner = va.path("name").asText().replaceFirst(" - .*$", "");
+            va.put("label", body.path("label").asText()).put("name", owner + " - " + body.path("label").asText())
+                    .put("updatedOn", "2026-11-23T10:00:00Z");
+            return ok(JSON.createObjectNode().put("savingsId", va.path("savingsId").asLong()));
+        }
+        if (method.equals("POST") && (m = Pattern.compile("/oneubank/virtual-accounts/(\\d+)/close").matcher(api)).matches()) {
+            long savingsId = Long.parseLong(m.group(1));
+            ObjectNode va = virtualAccounts.get(savingsId);
+            ObjectNode account = savings.get(savingsId);
+            if (!"CLOSED".equals(va.path("status").asText())) {
+                if (account.path("summary").path("accountBalance").decimalValue().signum() != 0) {
+                    return new Object[] { 403, error(403, "error.msg.oneubank.virtualaccount.not.empty", "Not empty") };
+                }
+                boolean held = holds.values().stream().anyMatch(h -> h.path("savingsId").asLong() == savingsId && !h.path("released").asBoolean());
+                JsonNode sub = account.path("subStatus");
+                if (held || sub.path("block").asBoolean() || sub.path("blockDebit").asBoolean() || sub.path("blockCredit").asBoolean()) {
+                    return new Object[] { 403, error(403, "error.msg.oneubank.virtualaccount.restricted", "Restricted") };
+                }
+                va.put("status", "CLOSED");
+                ((ObjectNode) account.get("status")).put("active", false).put("closed", true);
+            }
+            return ok(JSON.createObjectNode().put("savingsId", savingsId));
+        }
+        if (method.equals("GET") && (m = Pattern.compile("/oneubank/virtual-accounts/(\\d+)").matcher(api)).matches()) {
+            ObjectNode va = virtualAccounts.get(Long.parseLong(m.group(1)));
+            return va == null ? new Object[] { 404, error(404, "error.msg.oneubank.virtualaccount.not.found", "No such VA") } : ok(va);
+        }
+        if (method.equals("GET") && api.equals("/oneubank/virtual-accounts")) {
+            Map<String, String> q = new LinkedHashMap<>();
+            for (String pair : query.split("&")) {
+                String[] kv = pair.split("=", 2);
+                if (kv.length == 2) {
+                    q.put(kv[0], kv[1]);
+                }
+            }
+            if (q.containsKey("accountNumber") || q.containsKey("transactionReference")) {
+                String field = q.containsKey("accountNumber") ? "accountNumber" : "transactionReference";
+                return virtualAccounts.values().stream().filter(v -> q.get(field).equals(v.path(field).asText(null))).findFirst()
+                        .<Object[]>map(FakeCoreBanking::ok)
+                        .orElseGet(() -> new Object[] { 404, error(404, "error.msg.oneubank.virtualaccount.not.found", "No such VA") });
+            }
+            String owner = q.get("owner");
+            long after = Long.parseLong(q.getOrDefault("afterSavingsId", "0"));
+            int limit = Integer.parseInt(q.getOrDefault("limit", "20"));
+            List<ObjectNode> matches = virtualAccounts.values().stream()
+                    .filter(v -> v.path("savingsId").asLong() > after)
+                    .filter(v -> owner.equals(datatables.getOrDefault("Customer Owner", Map.of()).get(v.path("clientId").asLong())
+                            .get(0).path("Owner").asText()))
+                    .filter(v -> !q.containsKey("parentSavingsId") || q.get("parentSavingsId").equals(v.path("parentSavingsId").asText()))
+                    .filter(v -> !q.containsKey("type") || q.get("type").equals(v.path("type").asText())).toList();
+            ObjectNode page = JSON.createObjectNode();
+            ArrayNode items = page.putArray("items");
+            matches.stream().limit(limit).forEach(items::add);
+            page.put("hasMore", matches.size() > limit);
+            return ok(page);
+        }
+        return new Object[] { 404, error(404, "error.msg.resource.not.found", "No fake for " + method + " " + api) };
+    }
+
+    /** A hold placed outside the Banking API (staff in the back office, or migrated from TP): no reference. */
+    public synchronized long placeHoldWithoutReference(String accountNumber, String amount) {
+        ObjectNode body = JSON.createObjectNode().put("transactionAmount", amount).put("reasonForBlock", "Placed by staff");
+        holdAmount(savingsId(accountNumber), body);
+        return holds.keySet().stream().reduce((a, b) -> b).orElseThrow();
     }
 
     private ObjectNode search(JsonNode body) {

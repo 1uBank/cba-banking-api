@@ -211,7 +211,7 @@ class AccountEndpointsIT {
     void listsProducts() throws Exception {
         mvc.perform(get("/v1/products").with(app()))
                 .andExpect(status().isOk()).andExpect(openApi().isValid(CONTRACT))
-                .andExpect(jsonPath("$[*].id").value(Matchers.containsInAnyOrder(1, 3)))
+                .andExpect(jsonPath("$[*].id").value(Matchers.hasItems(1, 3)))
                 .andExpect(jsonPath("$[0].name").isNotEmpty());
     }
 

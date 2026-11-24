@@ -1173,8 +1173,8 @@ paths:
         Creates a permanent virtual account under an owned parent account. The virtual account
         belongs to the same customer as the parent, and is owned by the same client.
 
-        - `type` must be one of the types allowed for the client; any other is refused with
-          `422 VIRTUAL_ACCOUNT_TYPE_NOT_ALLOWED`.
+        - Any `type` can be created. Each type is opened on the savings product the bank has set up for it;
+          a type with no product yet is refused with `422 VIRTUAL_ACCOUNT_TYPE_UNAVAILABLE`.
         - The name payers see on name enquiry is built by the bank as `<owner's name> - <label>`.
           The owner's name always comes from the customer's verified details; only `label` is
           the client's.
@@ -1197,7 +1197,6 @@ paths:
               label: Smart Transfer
               parentAccountNumber: '2000000158'
               type: SMART_TRANSFER
-              bvn: '22200000001'
       responses:
         '201':
           description: Virtual account created.
@@ -1214,7 +1213,6 @@ paths:
                 label: Smart Transfer
                 parentAccountNumber: '2000000158'
                 type: SMART_TRANSFER
-                bvn: '22200000001'
                 status: ACTIVE
                 createdDate: '2026-11-08T10:15:00+01:00'
                 updatedDate: '2026-11-08T10:15:00+01:00'
@@ -1580,10 +1578,8 @@ paths:
         placed before the Banking API, have no such reference; release those by `accountNumber`
         and `holdTransactionId`.
 
-        A hold is released once. Releasing it again returns the original result.
-
-        A hold placed by the bank (in the back office, or by compliance screening) cannot be
-        released here: `422 ACCOUNT_RESTRICTED`.
+        Any hold on the client's customers' accounts can be released here, including one placed by bank
+        staff in the back office. A hold is released once. Releasing it again returns the original result.
       security:
         - bearerToken: []
         - clientCredentials: [transfers]
@@ -1693,7 +1689,7 @@ paths:
               reason: Cashier on leave
       responses:
         '201':
-          description: Blocked. The account's blocks now in place.
+          description: Blocked. The block now in place.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -1703,11 +1699,8 @@ paths:
                 $ref: '#/components/schemas/AccountBlocks'
               example:
                 accountNumber: '9000001234'
-                blocks:
-                  - type: CREDIT
-                    placedBy: CLIENT
-                    reason: Cashier on leave
-                    placedDate: '2026-11-16T09:00:00+01:00'
+                block: CREDIT
+                reason: Cashier on leave
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1720,7 +1713,7 @@ paths:
       tags: [Blocks]
       operationId: listBlocks
       summary: List an account's blocks
-      description: Every block in place on the account, whoever placed it.
+      description: The block in place on the account, whether placed through this API or by bank staff.
       security:
         - bearerToken: []
         - clientCredentials: [accounts]
@@ -1748,11 +1741,11 @@ paths:
     post:
       tags: [Blocks]
       operationId: liftBlock
-      summary: Lift a block the client placed
+      summary: Lift a block
       description: |
-        Lifts a block of this `type` that the client placed. A block placed by the bank stays in
-        place: `422 ACCOUNT_RESTRICTED`, and the account stays blocked. Lifting a block that is not
-        in place returns the current blocks unchanged.
+        Lifts the block of this `type`, whether placed through this API or by bank staff. Lifting
+        `DEBIT` from an `ALL` block leaves `CREDIT` in place, and the other way round. Lifting a block
+        that is not in place returns the current block unchanged.
       security:
         - bearerToken: []
         - clientCredentials: [accounts]
@@ -1766,7 +1759,7 @@ paths:
         - $ref: '#/components/parameters/CorrelationId'
       responses:
         '200':
-          description: Lifted. The account's blocks still in place.
+          description: Lifted. The block still in place, if any.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -1790,10 +1783,10 @@ paths:
       summary: Debit a customer for a service
       description: |
         Debits a customer's account for a service the client provides. The payment type, sent by
-        name, decides where the money goes in the ledger; only payment types configured for the
-        client are accepted (see `GET /v1/payment-types`). Any other is refused with
-        `422 PAYMENT_TYPE_NOT_ALLOWED`. The account must be owned by the client. A retry
-        with the same `transactionReference` returns the original debit.
+        name, decides where the money goes in the ledger. Any payment type the bank has set up can be
+        used (see `GET /v1/payment-types`); a name the bank does not have is refused with
+        `422 PAYMENT_TYPE_UNKNOWN`. The account must be owned by the client. A retry with the same
+        `transactionReference` returns the original debit.
       security:
         - bearerToken: []
         - clientCredentials: [transfers]
@@ -2043,8 +2036,8 @@ paths:
     get:
       tags: [Reference data]
       operationId: listPaymentTypes
-      summary: List the client's payment types
-      description: Payment types for service debits, for example bills or SMS fees. Only those configured for the client are listed.
+      summary: List payment types
+      description: The payment types the bank has set up, for service debits (for example bills or SMS fees).
       security:
         - bearerToken: []
         - clientCredentials: [transfers]
@@ -2202,7 +2195,7 @@ components:
       description: |
         Refused by a banking rule; nothing was posted. `code` is one of `INSUFFICIENT_FUNDS`,
         `LIMIT_EXCEEDED`, `ACCOUNT_NOT_ACTIVE`, `ACCOUNT_RESTRICTED`, `SCREENING_REFUSED`,
-        `VIRTUAL_ACCOUNT_TYPE_NOT_ALLOWED`, `PAYMENT_TYPE_NOT_ALLOWED`, `ACCOUNT_NOT_EMPTY`.
+        `VIRTUAL_ACCOUNT_TYPE_UNAVAILABLE`, `PAYMENT_TYPE_UNKNOWN`, `ACCOUNT_NOT_EMPTY`.
       content:
         application/problem+json:
           schema:
@@ -2310,10 +2303,10 @@ components:
             - CUSTOMER_NOT_FOUND
             - CUSTOMER_EXISTS
             - ACCOUNT_NUMBER_TAKEN
-            - VIRTUAL_ACCOUNT_TYPE_NOT_ALLOWED
+            - VIRTUAL_ACCOUNT_TYPE_UNAVAILABLE
             - INVOICE_NOT_FOUND
             - HOLD_NOT_FOUND
-            - PAYMENT_TYPE_NOT_ALLOWED
+            - PAYMENT_TYPE_UNKNOWN
             - TRANSACTION_NOT_FOUND
             - REFERENCE_REUSED
             - REQUEST_IN_PROGRESS
@@ -3186,7 +3179,7 @@ components:
     VirtualAccountType:
       type: string
       description: |
-        What a static virtual account is for. Each client may create only the types allowed for it.
+        What a static virtual account is for.
 
         - `SMART_TRANSFER`: a Smart Transfer group's account.
         - `AIRTIME`: airtime top-up; the account number is the customer's phone number.
@@ -3212,10 +3205,6 @@ components:
           allOf:
             - $ref: '#/components/schemas/AccountNumber'
           description: Required for `AIRTIME`, refused for any other type. The customer's phone number without the leading 0.
-        bvn:
-          allOf:
-            - $ref: '#/components/schemas/Bvn'
-          description: Stored with the virtual account. The customer comes from the parent account, never from the BVN.
         transactionReference:
           allOf:
             - $ref: '#/components/schemas/TransactionReference'
@@ -3236,8 +3225,6 @@ components:
           $ref: '#/components/schemas/AccountNumber'
         type:
           $ref: '#/components/schemas/VirtualAccountType'
-        bvn:
-          $ref: '#/components/schemas/Bvn'
         status:
           type: string
           enum: [ACTIVE, CLOSED]
@@ -3279,32 +3266,21 @@ components:
 
     AccountBlocks:
       type: object
-      required: [accountNumber, blocks]
+      required: [accountNumber, block]
       properties:
         accountNumber:
           $ref: '#/components/schemas/AccountNumber'
-        blocks:
-          type: array
-          description: Empty when the account is not blocked.
-          items:
-            type: object
-            required: [type, placedBy, placedDate]
-            properties:
-              type:
-                $ref: '#/components/schemas/BlockType'
-              placedBy:
-                type: string
-                description: |
-                  - `CLIENT`: this client; it can lift the block.
-                  - `BANK`: the bank, in the back office or through compliance screening; only the
-                    bank can lift it.
-                enum: [CLIENT, BANK]
-              reason:
-                type: string
-                description: The client's reason. Not shown for a block placed by the bank.
-              placedDate:
-                type: string
-                format: date-time
+        block:
+          type: string
+          description: |
+            - `NONE`: not blocked.
+            - `CREDIT`: no money in.
+            - `DEBIT`: no money out.
+            - `ALL`: neither.
+          enum: [NONE, CREDIT, DEBIT, ALL]
+        reason:
+          type: string
+          description: The reason given when the account was last blocked. Absent when not blocked.
 
     InvoiceAmountRule:
       type: string
