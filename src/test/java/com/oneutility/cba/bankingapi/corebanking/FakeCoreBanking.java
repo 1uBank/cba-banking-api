@@ -52,6 +52,10 @@ public final class FakeCoreBanking implements AutoCloseable {
             new String[] { "Individual Savings", "002", null }, 3L, new String[] { "Current Account", "005", null }, 4L,
             new String[] { "Smart Transfer Account", "600", "SMART_TRANSFER" }, 5L,
             new String[] { "Virtual Accounts", "555", "AIRTIME" }));
+    /** Account transfers by ID, and the reference each was made with. */
+    private final Map<Long, ObjectNode> transfers = new LinkedHashMap<>();
+    /** Withdrawals by savings ID and external ID. */
+    private final Map<String, ObjectNode> withdrawals = new LinkedHashMap<>();
     /** Virtual accounts by savings ID. */
     private final Map<Long, ObjectNode> virtualAccounts = new LinkedHashMap<>();
 
@@ -245,7 +249,7 @@ public final class FakeCoreBanking implements AutoCloseable {
         if (method.equals("GET") && api.equals("/savingsproducts")) {
             ArrayNode list = JSON.createArrayNode();
             products.forEach((id, p) -> list.addObject().put("id", id).put("name", p[0]).put("nubanPrefix", p[1])
-                    .put("enforceTierLimits", true).putObject("currency").put("code", "NGN"));
+                    .put("enforceTierLimits", p[2] == null).put("virtualAccountType", p[2]).putObject("currency").put("code", "NGN"));
             return ok(list);
         }
         if (method.equals("GET") && (m = Pattern.compile("/clients/(\\d+)/accounts").matcher(api)).matches()) {
@@ -279,10 +283,47 @@ public final class FakeCoreBanking implements AutoCloseable {
             return releaseAmount(Long.parseLong(m.group(1)), Long.parseLong(m.group(2)));
         }
         if (method.equals("POST") && (m = Pattern.compile("/savingsaccounts/(\\d+)").matcher(api)).matches()) {
-            return blockCommand(Long.parseLong(m.group(1)), query.replace("command=", ""), body);
+            return blockCommand(Long.parseLong(m.group(1)), query.replace("command=", ""), body, API_USER);
+        }
+        if (method.equals("POST") && api.equals("/accounttransfers")) {
+            return accountTransfer(body, idempotencyKey);
+        }
+        if (method.equals("GET") && api.equals("/oneubank/transfers")) {
+            String reference = query.replaceAll(".*transactionReference=([^&]*).*", "$1");
+            return transfers.values().stream().filter(t -> reference.equals(t.path("transactionReference").asText())).findFirst()
+                    .<Object[]>map(FakeCoreBanking::ok)
+                    .orElseGet(() -> new Object[] { 404, error(404, "error.msg.oneubank.transfer.not.found", "No such transfer") });
+        }
+        if (method.equals("POST") && (m = Pattern.compile("/savingsaccounts/(\\d+)/transactions").matcher(api)).matches()
+                && query.equals("command=withdrawal")) {
+            return withdraw(Long.parseLong(m.group(1)), body, idempotencyKey);
+        }
+        if (method.equals("GET") && (m = Pattern.compile("/savingsaccounts/(\\d+)/transactions/external-id/(.+)").matcher(api)).matches()) {
+            ObjectNode w = withdrawals.get(m.group(1) + "/" + m.group(2));
+            return w == null ? new Object[] { 404, error(404, "error.msg.saving.account.trasaction.id.invalid", "No such transaction") } : ok(w);
+        }
+        if (method.equals("GET") && api.equals("/paymenttypes")) {
+            ArrayNode list = JSON.createArrayNode();
+            list.addObject().put("id", 1).put("name", "Money Transfer").put("description", "Money Transfer");
+            list.addObject().put("id", 7).put("name", "SMS Fee").put("description", "SMS alerts");
+            return ok(list);
         }
         if (api.startsWith("/oneubank/virtual-accounts")) {
             return virtualAccountRoute(method, api, body, idempotencyKey);
+        }
+        if (method.equals("GET") && api.equals("/oneubank/blocks")) {
+            long savingsId = Long.parseLong(query.replaceAll(".*savingsId=(\\d+).*", "$1"));
+            ObjectNode account = savings.get(savingsId);
+            JsonNode sub = account.path("subStatus");
+            ObjectNode result = JSON.createObjectNode().put("savingsId", savingsId);
+            for (String side : List.of("debit", "credit")) {
+                boolean blocked = sub.path("block").asBoolean() || sub.path(side.equals("debit") ? "blockDebit" : "blockCredit").asBoolean();
+                ObjectNode s = result.putObject(side).put("blocked", blocked);
+                if (blocked && account.path("blockSides").has(side)) {
+                    s.setAll((ObjectNode) account.path("blockSides").get(side));
+                }
+            }
+            return ok(result);
         }
         if (method.equals("GET") && api.equals("/oneubank/holds")) {
             return findHold();
@@ -345,7 +386,7 @@ public final class FakeCoreBanking implements AutoCloseable {
         long clientId = ids.incrementAndGet();
         long savingsId = ids.incrementAndGet();
         boolean business = client.path("legalFormId").asInt() == 2;
-        ObjectNode stored = JSON.createObjectNode().put("id", clientId);
+        ObjectNode stored = JSON.createObjectNode().put("id", clientId).put("officeId", 1);
         for (String field : List.of("firstname", "middlename", "lastname", "fullname", "mobileNo", "emailAddress")) {
             if (client.hasNonNull(field)) {
                 stored.put(field, client.get(field).asText());
@@ -476,6 +517,13 @@ public final class FakeCoreBanking implements AutoCloseable {
     }
 
     private Object[] holdAmount(long savingsId, JsonNode body) {
+        return holdAmount(savingsId, body, API_USER);
+    }
+
+    /** The Banking API's user in CBA-CORE: what it places counts as placed by the client. */
+    static final String API_USER = "service-account-banking-api";
+
+    private Object[] holdAmount(long savingsId, JsonNode body, String placedBy) {
         Object[] refused = unsupported(body, Set.of("transactionAmount", "transactionDate", "reasonForBlock", "externalId",
                 "locale", "dateFormat"));
         if (refused != null) {
@@ -501,7 +549,7 @@ public final class FakeCoreBanking implements AutoCloseable {
                 .put("accountNo", account.path("accountNo").asText()).put("clientId", account.path("clientId").asLong())
                 .put("amount", amount).put("reason", body.path("reasonForBlock").asText())
                 .put("transactionReference", reference).put("createdOn", "2026-11-23T09:15:00Z").put("released", false)
-                .put("reversed", false));
+                .put("reversed", false).put("placedBy", placedBy));
         summary.put("availableBalance", available.subtract(amount));
         return ok(JSON.createObjectNode().put("savingsId", savingsId).put("resourceId", id));
     }
@@ -522,7 +570,7 @@ public final class FakeCoreBanking implements AutoCloseable {
     }
 
     /** Fineract's block commands: the debit and credit blocks combine, and repeating one is refused. */
-    private Object[] blockCommand(long savingsId, String command, JsonNode body) {
+    private Object[] blockCommand(long savingsId, String command, JsonNode body, String maker) {
         ObjectNode account = savings.get(savingsId);
         ObjectNode sub = (ObjectNode) account.get("subStatus");
         boolean debit = sub.path("block").asBoolean() || sub.path("blockDebit").asBoolean();
@@ -543,6 +591,18 @@ public final class FakeCoreBanking implements AutoCloseable {
         if (blocking) {
             account.put("reasonForBlock", body.path("reasonForBlock").asText());
         }
+        // Like CBA-CORE's block lookup: each side remembers the command that blocked it
+        ObjectNode sides = account.has("blockSides") ? (ObjectNode) account.get("blockSides") : account.putObject("blockSides");
+        for (String side : List.of("debit", "credit")) {
+            boolean affected = side.equals("debit") ? wantDebit : wantCredit;
+            boolean nowBlocked = side.equals("debit") ? newDebit : newCredit;
+            if (!nowBlocked) {
+                sides.remove(side);
+            } else if (blocking && affected) {
+                sides.putObject(side).put("placedBy", maker).put("reason", body.path("reasonForBlock").asText())
+                        .put("placedOn", "2026-11-24T08:00:00Z");
+            }
+        }
         return ok(JSON.createObjectNode().put("savingsId", savingsId).put("resourceId", savingsId));
     }
 
@@ -554,6 +614,102 @@ public final class FakeCoreBanking implements AutoCloseable {
                         .filter(h -> h.path("savingsId").asLong() == Long.parseLong(query.replaceAll(".*savingsId=(\\d+).*", "$1")));
         return hold.<Object[]>map(FakeCoreBanking::ok)
                 .orElseGet(() -> new Object[] { 404, error(404, "error.msg.oneubank.hold.not.found", "No such hold") });
+    }
+
+    /** Debit-side and credit-side checks as Fineract makes them, then both postings. */
+    private Object[] accountTransfer(JsonNode body, String idempotencyKey) {
+        if (idempotencyKey != null && idempotent.containsKey(idempotencyKey)) {
+            return ok(idempotent.get(idempotencyKey));
+        }
+        Object[] refused = unsupported(body, Set.of("fromOfficeId", "fromClientId", "fromAccountType", "fromAccountId", "toOfficeId",
+                "toClientId", "toAccountType", "toAccountId", "transferAmount", "transferDate", "transferDescription", "locale",
+                "dateFormat"));
+        if (refused != null) {
+            return refused;
+        }
+        ObjectNode from = savings.get(body.path("fromAccountId").asLong());
+        ObjectNode to = savings.get(body.path("toAccountId").asLong());
+        java.math.BigDecimal amount = new java.math.BigDecimal(body.path("transferAmount").asText());
+        Object[] blocked = movable(from, amount, true);
+        if (blocked == null) {
+            blocked = movable(to, amount, false);
+        }
+        if (blocked != null) {
+            return blocked;
+        }
+        post(from, amount.negate());
+        post(to, amount);
+        long id = ids.incrementAndGet();
+        transfers.put(id, JSON.createObjectNode().put("transferId", id).put("transactionReference", idempotencyKey)
+                .put("fromSavingsId", from.path("id").asLong()).put("fromAccountNo", from.path("accountNo").asText())
+                .put("fromClientId", from.path("clientId").asLong()).put("toSavingsId", to.path("id").asLong())
+                .put("toAccountNo", to.path("accountNo").asText()).put("toClientId", to.path("clientId").asLong())
+                .put("toClientName", to.path("clientName").asText()).put("amount", amount)
+                .put("description", body.path("transferDescription").asText()).put("createdOn", "2026-11-24T08:30:00Z")
+                .put("reversed", false));
+        ObjectNode result = JSON.createObjectNode().put("resourceId", id).put("savingsId", from.path("id").asLong());
+        if (idempotencyKey != null) {
+            idempotent.put(idempotencyKey, result);
+        }
+        return ok(result);
+    }
+
+    private Object[] withdraw(long savingsId, JsonNode body, String idempotencyKey) {
+        if (idempotencyKey != null && idempotent.containsKey(idempotencyKey)) {
+            return ok(idempotent.get(idempotencyKey));
+        }
+        Object[] refused = unsupported(body, Set.of("transactionDate", "transactionAmount", "paymentTypeId", "externalId", "note",
+                "locale", "dateFormat"));
+        if (refused != null) {
+            return refused;
+        }
+        String reference = body.path("externalId").asText();
+        if (withdrawals.values().stream().anyMatch(w -> reference.equals(w.path("externalId").asText()))) {
+            return new Object[] { 403, error(403, "error.msg.savings.transaction.external.id.duplicate", "Duplicate external id") };
+        }
+        ObjectNode account = savings.get(savingsId);
+        java.math.BigDecimal amount = new java.math.BigDecimal(body.path("transactionAmount").asText());
+        Object[] blocked = movable(account, amount, true);
+        if (blocked != null) {
+            return blocked;
+        }
+        post(account, amount.negate());
+        long id = ids.incrementAndGet();
+        String paymentType = body.path("paymentTypeId").asLong() == 7 ? "SMS Fee" : "Money Transfer";
+        ObjectNode w = JSON.createObjectNode().put("id", id).put("accountNo", account.path("accountNo").asText())
+                .put("externalId", reference).put("amount", amount).put("reversed", false).put("note", body.path("note").asText(null));
+        w.putArray("date").add(2026).add(11).add(24);
+        w.putObject("paymentDetailData").putObject("paymentType").put("id", body.path("paymentTypeId").asLong()).put("name", paymentType);
+        withdrawals.put(savingsId + "/" + reference, w);
+        ObjectNode result = JSON.createObjectNode().put("resourceId", id).put("savingsId", savingsId);
+        if (idempotencyKey != null) {
+            idempotent.put(idempotencyKey, result);
+        }
+        return ok(result);
+    }
+
+    /** Null if the money can move out of ({@code debit}) or into the account; otherwise Fineract's refusal. */
+    private static Object[] movable(ObjectNode account, java.math.BigDecimal amount, boolean debit) {
+        if (!account.path("status").path("active").asBoolean()) {
+            return new Object[] { 403, error(403, "error.msg.savingsaccount.transaction.account.is.not.active", "Account is not active") };
+        }
+        JsonNode sub = account.path("subStatus");
+        if (sub.path("block").asBoolean() || sub.path(debit ? "blockDebit" : "blockCredit").asBoolean()) {
+            // Fineract's own codes, as seen against a running CBA-CORE
+            return new Object[] { 403, error(403, "error.msg.savings.account." + (debit ? "debit" : "credit") + ".transaction.not.allowed",
+                    "Any " + (debit ? "Debit" : "Credit") + " transactions to this account is not allowed, since the account is blocked") };
+        }
+        if (debit && amount.compareTo(account.path("summary").path("availableBalance").decimalValue()) > 0) {
+            return new Object[] { 403, error(403, "error.msg.savingsaccount.transaction.insufficient.account.balance",
+                    "Insufficient account balance") };
+        }
+        return null;
+    }
+
+    private static void post(ObjectNode account, java.math.BigDecimal amount) {
+        ObjectNode summary = (ObjectNode) account.get("summary");
+        summary.put("accountBalance", summary.path("accountBalance").decimalValue().add(amount))
+                .put("availableBalance", summary.path("availableBalance").decimalValue().add(amount));
     }
 
     private Object[] virtualAccountRoute(String method, String api, JsonNode body, String idempotencyKey) {
@@ -664,11 +820,27 @@ public final class FakeCoreBanking implements AutoCloseable {
         return new Object[] { 404, error(404, "error.msg.resource.not.found", "No fake for " + method + " " + api) };
     }
 
+    /** Marks a hold as reversed, as undoing it in the back office does. */
+    public synchronized void reverseHold(long holdTransactionId) {
+        holds.get(holdTransactionId).put("reversed", true);
+    }
+
+    /** Gives a virtual account a type, for example one the Banking API does not know. */
+    public synchronized void setVirtualAccountType(String accountNumber, String type) {
+        virtualAccounts.values().stream().filter(v -> accountNumber.equals(v.path("accountNumber").asText()))
+                .forEach(v -> v.put("type", type));
+    }
+
     /** A hold placed outside the Banking API (staff in the back office, or migrated from TP): no reference. */
-    public synchronized long placeHoldWithoutReference(String accountNumber, String amount) {
-        ObjectNode body = JSON.createObjectNode().put("transactionAmount", amount).put("reasonForBlock", "Placed by staff");
-        holdAmount(savingsId(accountNumber), body);
+    public synchronized long placeHoldWithoutReference(String accountNumber, String amount, String placedBy) {
+        ObjectNode body = JSON.createObjectNode().put("transactionAmount", amount).put("reasonForBlock", "Placed by " + placedBy);
+        holdAmount(savingsId(accountNumber), body, placedBy);
         return holds.keySet().stream().reduce((a, b) -> b).orElseThrow();
+    }
+
+    /** A block placed by bank staff in the back office. */
+    public synchronized void staffBlock(String accountNumber, String command, String reason) {
+        blockCommand(savingsId(accountNumber), command, JSON.createObjectNode().put("reasonForBlock", reason), "jane.staff");
     }
 
     private ObjectNode search(JsonNode body) {

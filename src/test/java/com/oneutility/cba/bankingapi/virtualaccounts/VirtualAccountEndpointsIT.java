@@ -125,8 +125,10 @@ class VirtualAccountEndpointsIT {
                 .andExpect(status().isOk()).andExpect(openApi().isValid(CONTRACT))
                 .andExpect(jsonPath("$.name").value("Ada Obi - School fees"));
 
-        // Its balance and blocks are those of its account
-        mvc.perform(get("/v1/accounts/{n}", number).with(app())).andExpect(status().isOk());
+        // Its balance and blocks are those of its account, which the account calls show as a virtual account
+        mvc.perform(get("/v1/accounts/{n}", number).with(app()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.accountType").value("STATIC_VA"));
+        mvc.perform(get("/v1/accounts/{n}", parent).with(app())).andExpect(jsonPath("$.accountType").value("CUSTOMER"));
         CORE.setBalances(CORE.savingsId(number), "50", "50");
         mvc.perform(post("/v1/virtual-accounts/{n}/close", number).with(app()))
                 .andExpect(status().isUnprocessableEntity()).andExpect(openApi().isValid(CONTRACT))
@@ -195,6 +197,14 @@ class VirtualAccountEndpointsIT {
                 .andExpect(jsonPath("$.nextCursor").doesNotExist());
         mvc.perform(get("/v1/virtual-accounts?parentAccountNumber={p}", parent).with(app()))
                 .andExpect(jsonPath("$.items.length()").value(3));
+
+        // A type the contract does not know is left out, not a failure
+        String airtime = JSON.readTree(mvc.perform(get("/v1/virtual-accounts?parentAccountNumber={p}&type=AIRTIME", parent).with(app()))
+                .andReturn().getResponse().getContentAsString()).path("items").get(0).path("accountNumber").asText();
+        CORE.setVirtualAccountType(airtime, "LOTTERY");
+        mvc.perform(get("/v1/virtual-accounts?parentAccountNumber={p}", parent).with(app()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items.length()").value(2));
+        mvc.perform(get("/v1/virtual-accounts/{n}", airtime).with(app())).andExpect(status().isNotFound());
     }
 
     @Test

@@ -15,8 +15,10 @@ import java.time.LocalDate;
 import com.oneutility.cba.bankingapi.corebanking.fineract.HoldResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.HoldAmountCommand;
 import com.oneutility.cba.bankingapi.corebanking.fineract.AccountCommand;
+import com.oneutility.cba.bankingapi.corebanking.fineract.BlocksResponse;
 import com.oneutility.cba.bankingapi.corebanking.dto.CoreHold;
 import com.oneutility.cba.bankingapi.corebanking.dto.CoreBlock;
+import com.oneutility.cba.bankingapi.corebanking.dto.CoreBlockSide;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -29,9 +31,11 @@ public class CoreBankingAccounts {
     private static final ZoneId BANK_ZONE = ZoneId.of("Africa/Lagos");
 
     private final FineractApi api;
+    private final CoreBankingProperties properties;
 
-    CoreBankingAccounts(FineractApi api) {
+    CoreBankingAccounts(FineractApi api, CoreBankingProperties properties) {
         this.api = api;
+        this.properties = properties;
     }
 
     /** The account's number as customers know it: its NUBAN, which CBA-CORE issues as the account number. */
@@ -130,13 +134,29 @@ public class CoreBankingAccounts {
         }
     }
 
+    /** Each blocked side of the account, with who placed it; empty when nothing is blocked. */
+    public java.util.List<CoreBlockSide> blockSides(long savingsId) {
+        BlocksResponse blocks = api.getBlocks(savingsId);
+        java.util.List<CoreBlockSide> sides = new java.util.ArrayList<>();
+        side(sides, "CREDIT", blocks.credit());
+        side(sides, "DEBIT", blocks.debit());
+        return sides;
+    }
+
+    private void side(java.util.List<CoreBlockSide> sides, String type, BlocksResponse.Side side) {
+        if (side != null && side.blocked()) {
+            sides.add(new CoreBlockSide(type, properties.placedByClient(side.placedBy()), side.reason(), side.placedOn()));
+        }
+    }
+
     private void command(long savingsId, String command, AccountCommand body) {
         api.savingsAccountCommand(savingsId, command, body);
     }
 
-    private static CoreHold hold(HoldResponse h) {
+    private CoreHold hold(HoldResponse h) {
         return new CoreHold(h.holdTransactionId(), h.savingsId(), h.accountNo(), h.clientId() == null ? 0 : h.clientId(),
-                h.amount(), h.reason(), h.transactionReference(), h.createdOn(), h.released(), h.releasedOn());
+                h.amount(), h.reason(), h.transactionReference(), h.createdOn(), h.released(), h.releasedOn(), h.reversed(),
+                properties.placedByClient(h.placedBy()));
     }
 
     private static <T> Optional<T> notFoundAsEmpty(java.util.function.Supplier<T> call) {
@@ -150,10 +170,16 @@ public class CoreBankingAccounts {
         }
     }
 
-    /** The savings products accounts can be opened on. */
+    /** The IDs of the products static virtual accounts are opened on. */
+    public java.util.Set<Long> virtualAccountProductIds() {
+        return products().stream().filter(CoreProduct::forVirtualAccounts).map(CoreProduct::id)
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    /** Every savings product, those for virtual accounts included. */
     public List<CoreProduct> products() {
         return api.getSavingsProducts().stream()
-                .map(p -> new CoreProduct(p.id(), p.name(), p.shortName(), p.description())).toList();
+                .map(p -> new CoreProduct(p.id(), p.name(), p.shortName(), p.description(), p.virtualAccountType())).toList();
     }
 
     private static CoreAccount account(SavingsAccountResponse a) {

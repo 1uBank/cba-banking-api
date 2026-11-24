@@ -34,6 +34,7 @@ public class VirtualAccountService {
     static final int MAX_PAGE_SIZE = 100;
     private static final ZoneId BANK_ZONE = ZoneId.of("Africa/Lagos");
     private static final String CURSOR_PREFIX = "v:";
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(VirtualAccountService.class);
 
     private final AccountService accounts;
     private final CoreBankingVirtualAccounts virtualAccounts;
@@ -82,7 +83,9 @@ public class VirtualAccountService {
         String next = page.hasMore() && !page.items().isEmpty()
                 ? cursor(page.items().get(page.items().size() - 1).savingsId())
                 : null;
-        return new VirtualAccountPage(page.items().stream().map(VirtualAccountService::virtualAccount).toList(), next);
+        // A type this API does not know (for example one added in the back office) is left out rather than failing the page
+        return new VirtualAccountPage(page.items().stream().filter(VirtualAccountService::knownType)
+                .map(VirtualAccountService::virtualAccount).toList(), next);
     }
 
     public VirtualAccount rename(String accountNumber, String label) {
@@ -107,7 +110,7 @@ public class VirtualAccountService {
 
     private CoreVirtualAccount owned(String accountNumber) {
         Optional<CoreVirtualAccount> va = call(() -> virtualAccounts.findByNumber(accountNumber));
-        if (va.isEmpty() || !ownedByClient(va.get())) {
+        if (va.isEmpty() || !knownType(va.get()) || !ownedByClient(va.get())) {
             throw new ApiException(ErrorCode.ACCOUNT_NOT_FOUND, "No such virtual account for this client");
         }
         return va.get();
@@ -120,7 +123,7 @@ public class VirtualAccountService {
 
     private VirtualAccount sameOrConflict(CoreVirtualAccount earlier, CreateVirtualAccountRequest request) {
         if (!earlier.parentAccountNumber().equals(request.parentAccountNumber())
-                || !earlier.type().equals(request.type().name()) || !ownedByClient(earlier)) {
+                || !request.type().name().equals(earlier.type()) || !ownedByClient(earlier)) {
             throw new ApiException(ErrorCode.REFERENCE_REUSED,
                     "transactionReference " + request.transactionReference() + " was already used for another request");
         }
@@ -161,6 +164,14 @@ public class VirtualAccountService {
     }
 
     // Mapping and paging
+
+    private static boolean knownType(CoreVirtualAccount v) {
+        if (v.type() != null && java.util.Arrays.stream(VirtualAccountType.values()).anyMatch(t -> t.name().equals(v.type()))) {
+            return true;
+        }
+        LOG.warn("Virtual account {} has type {}, which the contract does not know; it is not shown", v.accountNumber(), v.type());
+        return false;
+    }
 
     private static VirtualAccount virtualAccount(CoreVirtualAccount v) {
         return new VirtualAccount(v.accountNumber(), v.name(), v.label(), v.parentAccountNumber(),

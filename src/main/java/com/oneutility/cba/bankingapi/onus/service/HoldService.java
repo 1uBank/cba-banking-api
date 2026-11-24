@@ -74,8 +74,11 @@ public class HoldService {
                     List.of(new FieldViolation("transactionReference",
                             "send transactionReference, or accountNumber with holdTransactionId")));
         }
-        if (hold.released()) {
+        if (!hold.active()) {
             return hold(hold);
+        }
+        if (!hold.placedByClient()) {
+            throw new ApiException(ErrorCode.ACCOUNT_RESTRICTED, "This hold was placed by the bank; only the bank can release it");
         }
         try {
             accounts.releaseHold(hold.savingsId(), hold.holdTransactionId());
@@ -110,8 +113,9 @@ public class HoldService {
 
     private static Hold hold(CoreHold h) {
         return new Hold(h.transactionReference(), h.holdTransactionId(), h.accountNumber(), h.savingsId(), h.clientId(),
-                h.amount().setScale(2, RoundingMode.HALF_EVEN).toPlainString(), h.reason(),
-                h.released() ? "RELEASED" : "ACTIVE", local(h.createdOn()), local(h.releasedOn()));
+                h.amount().setScale(2, RoundingMode.HALF_EVEN).toPlainString(), h.placedByClient() ? h.reason() : null,
+                h.placedByClient() ? "CLIENT" : "BANK",
+                h.active() ? "ACTIVE" : "RELEASED", local(h.createdOn()), local(h.releasedOn()));
     }
 
     private static OffsetDateTime local(OffsetDateTime time) {

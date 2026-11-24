@@ -139,15 +139,34 @@ class HoldAndBlockEndpointsIT {
     }
 
     @Test
-    void releasesAHoldPlacedElsewhereByItsTransactionId() throws Exception {
+    void releasesAMigratedHoldByItsTransactionIdButNotOneTheBankPlaced() throws Exception {
         String number = account("22200000402", "08000000402", "5000", "5000");
-        long holdId = CORE.placeHoldWithoutReference(number, "1000");
+        long migrated = CORE.placeHoldWithoutReference(number, "1000", "tp-migration");
+        long bank = CORE.placeHoldWithoutReference(number, "500", "jane.staff");
 
-        send(post("/v1/holds/release"), "{\"accountNumber\":\"%s\",\"holdTransactionId\":%d}".formatted(number, holdId))
+        send(post("/v1/holds/release"), "{\"accountNumber\":\"%s\",\"holdTransactionId\":%d}".formatted(number, migrated))
                 .andExpect(status().isOk()).andExpect(openApi().isValid(CONTRACT))
-                .andExpect(jsonPath("$.holdTransactionId").value(holdId))
+                .andExpect(jsonPath("$.holdTransactionId").value(migrated))
                 .andExpect(jsonPath("$.transactionReference").doesNotExist())
+                .andExpect(jsonPath("$.placedBy").value("CLIENT"))
                 .andExpect(jsonPath("$.status").value("RELEASED"));
+        send(post("/v1/holds/release"), "{\"accountNumber\":\"%s\",\"holdTransactionId\":%d}".formatted(number, bank))
+                .andExpect(status().isUnprocessableEntity()).andExpect(openApi().isValid(CONTRACT))
+                .andExpect(jsonPath("$.code").value("ACCOUNT_RESTRICTED"));
+        mvc.perform(get("/v1/accounts/{n}", number).with(app())).andExpect(jsonPath("$.availableBalance").value("4500.00"));
+    }
+
+    @Test
+    void aReversedHoldIsNoLongerActive() throws Exception {
+        String number = account("22200000407", "08000000407", "1000", "1000");
+        long holdId = JSON.readTree(send(post("/v1/holds"), hold(number, "100", "LIEN-407")).andReturn().getResponse()
+                .getContentAsString()).path("holdTransactionId").asLong();
+        CORE.reverseHold(holdId);
+
+        mvc.perform(get("/v1/holds/{ref}", "LIEN-407").with(app()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("RELEASED"));
+        send(post("/v1/holds/release"), "{\"transactionReference\":\"LIEN-407\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("RELEASED"));
     }
 
     @Test
@@ -187,10 +206,11 @@ class HoldAndBlockEndpointsIT {
 
         mvc.perform(get("/v1/accounts/{n}/blocks", number).with(app()))
                 .andExpect(status().isOk()).andExpect(openApi().isValid(CONTRACT))
-                .andExpect(jsonPath("$.block").value("NONE")).andExpect(jsonPath("$.reason").doesNotExist());
+                .andExpect(jsonPath("$.block").value("NONE")).andExpect(jsonPath("$.blocks.length()").value(0));
         send(post("/v1/accounts/{n}/blocks", number), "{\"type\":\"DEBIT\",\"reason\":\"Fraud check\"}")
                 .andExpect(status().isCreated()).andExpect(openApi().isValid(CONTRACT))
-                .andExpect(jsonPath("$.block").value("DEBIT")).andExpect(jsonPath("$.reason").value("Fraud check"));
+                .andExpect(jsonPath("$.block").value("DEBIT")).andExpect(jsonPath("$.blocks[0].placedBy").value("CLIENT"))
+                .andExpect(jsonPath("$.blocks[0].reason").value("Fraud check"));
         send(post("/v1/accounts/{n}/blocks", number), "{\"type\":\"DEBIT\",\"reason\":\"Again\"}")
                 .andExpect(status().isCreated()).andExpect(jsonPath("$.block").value("DEBIT"));
         send(post("/v1/accounts/{n}/blocks", number), "{\"type\":\"CREDIT\",\"reason\":\"Cashier on leave\"}")
@@ -206,6 +226,26 @@ class HoldAndBlockEndpointsIT {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.block").value("NONE"));
         send(post("/v1/accounts/{n}/blocks", number), "{\"type\":\"ALL\",\"reason\":\"Court order\"}")
                 .andExpect(status().isCreated()).andExpect(jsonPath("$.block").value("ALL"));
+        mvc.perform(post("/v1/accounts/{n}/blocks/{type}/lift", number, "CREDIT").with(app()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.block").value("DEBIT"));
+    }
+
+    @Test
+    void keepsBlocksTheBankPlaced() throws Exception {
+        String number = account("22200000408", "08000000408", "0", "0");
+        send(post("/v1/accounts/{n}/blocks", number), "{\"type\":\"CREDIT\",\"reason\":\"Cashier on leave\"}")
+                .andExpect(status().isCreated());
+        CORE.staffBlock(number, "blockDebit", "EFCC request 123");
+
+        mvc.perform(get("/v1/accounts/{n}/blocks", number).with(app()))
+                .andExpect(status().isOk()).andExpect(openApi().isValid(CONTRACT))
+                .andExpect(jsonPath("$.block").value("ALL"))
+                .andExpect(jsonPath("$.blocks[?(@.type == 'DEBIT')].placedBy").value(Matchers.contains("BANK")))
+                .andExpect(jsonPath("$.blocks[?(@.type == 'DEBIT')].reason").isEmpty())
+                .andExpect(jsonPath("$.blocks[?(@.type == 'CREDIT')].reason").value(Matchers.contains("Cashier on leave")));
+        mvc.perform(post("/v1/accounts/{n}/blocks/{type}/lift", number, "ALL").with(app()))
+                .andExpect(status().isUnprocessableEntity()).andExpect(openApi().isValid(CONTRACT))
+                .andExpect(jsonPath("$.code").value("ACCOUNT_RESTRICTED"));
         mvc.perform(post("/v1/accounts/{n}/blocks/{type}/lift", number, "CREDIT").with(app()))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.block").value("DEBIT"));
     }

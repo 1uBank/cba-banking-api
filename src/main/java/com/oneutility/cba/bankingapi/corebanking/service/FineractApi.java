@@ -1,5 +1,6 @@
 package com.oneutility.cba.bankingapi.corebanking.service;
 
+import com.oneutility.cba.bankingapi.corebanking.fineract.BlocksResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.ClientAccountsResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.ClientAddressResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.ClientIdentifierResponse;
@@ -18,6 +19,11 @@ import com.oneutility.cba.bankingapi.corebanking.fineract.CreateVirtualAccountCo
 import com.oneutility.cba.bankingapi.corebanking.fineract.RenameVirtualAccountCommand;
 import com.oneutility.cba.bankingapi.corebanking.fineract.VirtualAccountListResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.VirtualAccountResponse;
+import com.oneutility.cba.bankingapi.corebanking.fineract.AccountTransferCommand;
+import com.oneutility.cba.bankingapi.corebanking.fineract.PaymentTypeResponse;
+import com.oneutility.cba.bankingapi.corebanking.fineract.SavingsTransactionResponse;
+import com.oneutility.cba.bankingapi.corebanking.fineract.TransferResponse;
+import com.oneutility.cba.bankingapi.corebanking.fineract.WithdrawalCommand;
 import com.oneutility.cba.bankingapi.corebanking.fineract.KycRow;
 import com.oneutility.cba.bankingapi.corebanking.fineract.LimitRow;
 import com.oneutility.cba.bankingapi.corebanking.fineract.OpenAccountCommand;
@@ -140,6 +146,10 @@ interface FineractApi {
     CommandResult savingsAccountCommand(@PathVariable long savingsId, @RequestParam("command") String command,
             @RequestBody AccountCommand body);
 
+    /** 1UBank: each side of an account's block, with who placed it. */
+    @GetExchange("/oneubank/blocks")
+    BlocksResponse getBlocks(@RequestParam("savingsId") long savingsId);
+
     /** 1UBank: a hold by the reference it was placed with. */
     @GetExchange("/oneubank/holds")
     HoldResponse findHoldByReference(@RequestParam("transactionReference") String transactionReference);
@@ -176,6 +186,26 @@ interface FineractApi {
             @RequestParam(name = "type", required = false) String type,
             @RequestParam(name = "afterSavingsId", required = false) Long afterSavingsId,
             @RequestParam("limit") int limit);
+
+    // Transfers and debits
+
+    @PostExchange("/accounttransfers")
+    CommandResult createAccountTransfer(@RequestBody AccountTransferCommand command,
+            @RequestHeader(name = IDEMPOTENCY_KEY) String idempotencyKey);
+
+    /** 1UBank: an account transfer by the reference it was made with. */
+    @GetExchange("/oneubank/transfers")
+    TransferResponse findTransfer(@RequestParam("transactionReference") String transactionReference);
+
+    @PostExchange("/savingsaccounts/{savingsId}/transactions?command=withdrawal")
+    CommandResult withdraw(@PathVariable long savingsId, @RequestBody WithdrawalCommand command,
+            @RequestHeader(name = IDEMPOTENCY_KEY) String idempotencyKey);
+
+    @GetExchange("/savingsaccounts/{savingsId}/transactions/external-id/{externalId}")
+    SavingsTransactionResponse getTransactionByExternalId(@PathVariable long savingsId, @PathVariable String externalId);
+
+    @GetExchange("/paymenttypes")
+    List<PaymentTypeResponse> getPaymentTypes();
 
     @GetExchange("/savingsproducts")
     List<SavingsProductResponse> getSavingsProducts();

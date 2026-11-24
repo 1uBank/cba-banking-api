@@ -8,5 +8,5 @@ import java.time.OffsetDateTime;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record HoldResponse(long holdTransactionId, long savingsId, String accountNo, Long clientId, BigDecimal amount,
         String reason, String transactionReference, OffsetDateTime createdOn, boolean released,
-        Long releaseTransactionId, OffsetDateTime releasedOn, boolean reversed) {
+        Long releaseTransactionId, OffsetDateTime releasedOn, boolean reversed, String placedBy) {
 }

@@ -7,6 +7,7 @@ banking-api:
     base-url: http://localhost:1/fineract-provider/api/v1
     token-url: http://localhost:1/realms/cba/protocol/openid-connect/token
     client-secret: test-only
+    client-placed-by: tp-migration
 
 management:
   server:

@@ -484,9 +484,10 @@ paths:
       operationId: getTransfer
       summary: Get a transfer and its current status
       description: |
-        Works for intra-bank and interbank transfers, by the client's `transactionReference`. Read
-        from the Banking API's records, so it answers quickly and stays available when the
-        ledger or NIBSS is slow.
+        Works for intra-bank and interbank transfers, by the client's `transactionReference`. An
+        intra-bank transfer is final when made and is read from the core ledger. An interbank
+        transfer's status is read from the Banking API's records, so it answers quickly and stays
+        available when NIBSS is slow.
       security:
         - bearerToken: []
         - clientCredentials: [transfers]
@@ -1578,8 +1579,10 @@ paths:
         placed before the Banking API, have no such reference; release those by `accountNumber`
         and `holdTransactionId`.
 
-        Any hold on the client's customers' accounts can be released here, including one placed by bank
-        staff in the back office. A hold is released once. Releasing it again returns the original result.
+        A hold is released once. Releasing it again returns the original result.
+
+        A hold placed by the bank (in the back office, or by compliance screening) cannot be
+        released here: `422 ACCOUNT_RESTRICTED`, and the money stays held.
       security:
         - bearerToken: []
         - clientCredentials: [transfers]
@@ -1700,7 +1703,11 @@ paths:
               example:
                 accountNumber: '9000001234'
                 block: CREDIT
-                reason: Cashier on leave
+                blocks:
+                  - type: CREDIT
+                    placedBy: CLIENT
+                    reason: Cashier on leave
+                    placedDate: '2026-11-16T09:00:00+01:00'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1713,7 +1720,9 @@ paths:
       tags: [Blocks]
       operationId: listBlocks
       summary: List an account's blocks
-      description: The block in place on the account, whether placed through this API or by bank staff.
+      description: |
+        What is blocked on the account, and who placed each block. The reason is shown only for
+        blocks the client placed.
       security:
         - bearerToken: []
         - clientCredentials: [accounts]
@@ -1741,11 +1750,12 @@ paths:
     post:
       tags: [Blocks]
       operationId: liftBlock
-      summary: Lift a block
+      summary: Lift a block the client placed
       description: |
-        Lifts the block of this `type`, whether placed through this API or by bank staff. Lifting
-        `DEBIT` from an `ALL` block leaves `CREDIT` in place, and the other way round. Lifting a block
-        that is not in place returns the current block unchanged.
+        Lifts the client's block of this `type`. Lifting `DEBIT` from an `ALL` block leaves `CREDIT`
+        in place, and the other way round. A block placed by the bank stays in place: `422
+        ACCOUNT_RESTRICTED`, and nothing is lifted. Lifting a block that is not in place returns the
+        current blocks unchanged.
       security:
         - bearerToken: []
         - clientCredentials: [accounts]
@@ -3266,21 +3276,38 @@ components:
 
     AccountBlocks:
       type: object
-      required: [accountNumber, block]
+      required: [accountNumber, block, blocks]
       properties:
         accountNumber:
           $ref: '#/components/schemas/AccountNumber'
         block:
           type: string
           description: |
-            - `NONE`: not blocked.
-            - `CREDIT`: no money in.
-            - `DEBIT`: no money out.
-            - `ALL`: neither.
+            What is blocked: `NONE`, `CREDIT` (no money in), `DEBIT` (no money out) or `ALL` (neither).
           enum: [NONE, CREDIT, DEBIT, ALL]
-        reason:
-          type: string
-          description: The reason given when the account was last blocked. Absent when not blocked.
+        blocks:
+          type: array
+          description: Each blocked side and who placed it. Empty when the account is not blocked.
+          items:
+            type: object
+            required: [type, placedBy]
+            properties:
+              type:
+                type: string
+                enum: [CREDIT, DEBIT]
+              placedBy:
+                type: string
+                description: |
+                  - `CLIENT`: placed through this API; the client can lift it.
+                  - `BANK`: placed by the bank, in the back office or by compliance screening; only the
+                    bank can lift it.
+                enum: [CLIENT, BANK]
+              reason:
+                type: string
+                description: The client's reason. Not shown for a block placed by the bank.
+              placedDate:
+                type: string
+                format: date-time
 
     InvoiceAmountRule:
       type: string
@@ -3453,6 +3480,12 @@ components:
           $ref: '#/components/schemas/Money'
         reason:
           type: string
+        placedBy:
+          type: string
+          description: |
+            - `CLIENT`: placed through this API (or by the client before the Banking API); the client can release it.
+            - `BANK`: placed by the bank, in the back office or by compliance screening; only the bank can release it.
+          enum: [CLIENT, BANK]
         status:
           type: string
           enum: [ACTIVE, RELEASED]
@@ -3471,7 +3504,7 @@ components:
           $ref: '#/components/schemas/AccountNumber'
         paymentType:
           type: string
-          description: The name of one of the client's payment types.
+          description: The name of a payment type the bank has set up (see `GET /v1/payment-types`).
         amount:
           $ref: '#/components/schemas/Amount'
         narration:
