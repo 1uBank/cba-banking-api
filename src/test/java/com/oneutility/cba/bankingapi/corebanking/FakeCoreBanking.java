@@ -54,6 +54,8 @@ public final class FakeCoreBanking implements AutoCloseable {
             new String[] { "Virtual Accounts", "555", "AIRTIME" }));
     /** Account transfers by ID, and the reference each was made with. */
     private final Map<Long, ObjectNode> transfers = new LinkedHashMap<>();
+    /** Every posting that moved money, oldest first, as CBA-CORE's transaction query returns them. */
+    private final List<ObjectNode> ledger = new ArrayList<>();
     /** Withdrawals by savings ID and external ID. */
     private final Map<String, ObjectNode> withdrawals = new LinkedHashMap<>();
     /** Virtual accounts by savings ID. */
@@ -310,6 +312,9 @@ public final class FakeCoreBanking implements AutoCloseable {
         }
         if (api.startsWith("/oneubank/virtual-accounts")) {
             return virtualAccountRoute(method, api, body, idempotencyKey);
+        }
+        if (method.equals("GET") && api.equals("/oneubank/transactions")) {
+            return transactions();
         }
         if (method.equals("GET") && api.equals("/oneubank/blocks")) {
             long savingsId = Long.parseLong(query.replaceAll(".*savingsId=(\\d+).*", "$1"));
@@ -637,9 +642,19 @@ public final class FakeCoreBanking implements AutoCloseable {
         if (blocked != null) {
             return blocked;
         }
-        post(from, amount.negate());
-        post(to, amount);
+        long fromTxn = record(from, 2, amount.negate(), null, null, null);
+        long toTxn = record(to, 1, amount, null, null, null);
         long id = ids.incrementAndGet();
+        ObjectNode sides = JSON.createObjectNode().put("transferId", id).put("fromAccountNo", from.path("accountNo").asText())
+                .put("fromTransactionId", fromTxn).put("fromName", from.path("clientName").asText())
+                .put("toAccountNo", to.path("accountNo").asText()).put("toTransactionId", toTxn)
+                .put("toName", to.path("clientName").asText()).put("description", body.path("transferDescription").asText());
+        for (ObjectNode t : ledger) {
+            if (t.path("transactionId").asLong() == fromTxn || t.path("transactionId").asLong() == toTxn) {
+                t.set("transfer", sides);
+                t.put("transactionReference", idempotencyKey);
+            }
+        }
         transfers.put(id, JSON.createObjectNode().put("transferId", id).put("transactionReference", idempotencyKey)
                 .put("fromSavingsId", from.path("id").asLong()).put("fromAccountNo", from.path("accountNo").asText())
                 .put("fromClientId", from.path("clientId").asLong()).put("toSavingsId", to.path("id").asLong())
@@ -673,9 +688,8 @@ public final class FakeCoreBanking implements AutoCloseable {
         if (blocked != null) {
             return blocked;
         }
-        post(account, amount.negate());
-        long id = ids.incrementAndGet();
         String paymentType = body.path("paymentTypeId").asLong() == 7 ? "SMS Fee" : "Money Transfer";
+        long id = record(account, 2, amount.negate(), reference, paymentType, body.path("note").asText(null));
         ObjectNode w = JSON.createObjectNode().put("id", id).put("accountNo", account.path("accountNo").asText())
                 .put("externalId", reference).put("amount", amount).put("reversed", false).put("note", body.path("note").asText(null));
         w.putArray("date").add(2026).add(11).add(24);
@@ -704,6 +718,63 @@ public final class FakeCoreBanking implements AutoCloseable {
                     "Insufficient account balance") };
         }
         return null;
+    }
+
+    /** Posts {@code signedAmount} (negative for a debit) and records the transaction; returns its ID. */
+    private long record(ObjectNode account, int typeEnum, java.math.BigDecimal signedAmount, String reference, String paymentType,
+            String note) {
+        java.math.BigDecimal before = account.path("summary").path("accountBalance").decimalValue();
+        post(account, signedAmount);
+        long id = ids.incrementAndGet();
+        ObjectNode t = JSON.createObjectNode().put("transactionId", id).put("savingsId", account.path("id").asLong())
+                .put("accountNo", account.path("accountNo").asText()).put("clientId", account.path("clientId").asLong())
+                .put("typeEnum", typeEnum).put("entryType", signedAmount.signum() >= 0 ? "CREDIT" : "DEBIT")
+                .put("amount", signedAmount.abs()).put("balanceBefore", before).put("balanceAfter", before.add(signedAmount))
+                .put("transactionDate", java.time.LocalDate.now(java.time.ZoneId.of("Africa/Lagos")).toString())
+                .put("createdOn", "2026-11-24T08:30:00Z").put("reversed", false)
+                .put("reversal", false).put("transactionReference", reference).put("paymentType", paymentType).put("note", note);
+        virtualAccounts.values().stream().filter(v -> v.path("savingsId").asLong() == account.path("id").asLong()).findFirst()
+                .ifPresent(v -> t.put("virtualAccountType", v.path("type").asText()));
+        ledger.add(t);
+        return id;
+    }
+
+    /** A deposit into the account, as a teller or an inward payment would make. */
+    public synchronized void deposit(String accountNumber, String amount) {
+        record(savings.get(savingsId(accountNumber)), 1, new java.math.BigDecimal(amount), null, "Cash", "Cash deposit");
+    }
+
+    private Object[] transactions() {
+        Map<String, String> q = new LinkedHashMap<>();
+        for (String pair : query.split("&")) {
+            String[] kv = pair.split("=", 2);
+            if (kv.length == 2) {
+                q.put(kv[0], kv[1]);
+            }
+        }
+        ObjectNode page = JSON.createObjectNode();
+        ArrayNode items = page.putArray("items");
+        if (q.containsKey("transactionReference")) {
+            ledger.stream().filter(t -> q.get("transactionReference").equals(t.path("transactionReference").asText(null))).forEach(items::add);
+            return ok(page.put("hasMore", false));
+        }
+        long savingsId = Long.parseLong(q.get("savingsId"));
+        if (q.containsKey("transactionId")) {
+            ledger.stream().filter(t -> t.path("savingsId").asLong() == savingsId
+                    && t.path("transactionId").asText().equals(q.get("transactionId"))).forEach(items::add);
+            return ok(page.put("hasMore", false));
+        }
+        long before = Long.parseLong(q.getOrDefault("beforeId", String.valueOf(Long.MAX_VALUE)));
+        int limit = Integer.parseInt(q.getOrDefault("limit", "50"));
+        List<ObjectNode> matches = new ArrayList<>(ledger.stream().filter(t -> t.path("savingsId").asLong() == savingsId)
+                .filter(t -> t.path("transactionId").asLong() < before)
+                .filter(t -> !q.containsKey("type") || q.get("type").equals(t.path("entryType").asText()))
+                .filter(t -> t.path("transactionDate").asText().compareTo(q.get("fromDate")) >= 0
+                        && t.path("transactionDate").asText().compareTo(q.get("toDate")) <= 0)
+                .toList());
+        java.util.Collections.reverse(matches);
+        matches.stream().limit(limit).forEach(items::add);
+        return ok(page.put("hasMore", matches.size() > limit));
     }
 
     private static void post(ObjectNode account, java.math.BigDecimal amount) {

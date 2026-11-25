@@ -22,6 +22,7 @@ import com.oneutility.cba.bankingapi.corebanking.fineract.VirtualAccountResponse
 import com.oneutility.cba.bankingapi.corebanking.fineract.AccountTransferCommand;
 import com.oneutility.cba.bankingapi.corebanking.fineract.PaymentTypeResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.SavingsTransactionResponse;
+import com.oneutility.cba.bankingapi.corebanking.fineract.TransactionsResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.TransferResponse;
 import com.oneutility.cba.bankingapi.corebanking.fineract.WithdrawalCommand;
 import com.oneutility.cba.bankingapi.corebanking.fineract.KycRow;
@@ -206,6 +207,19 @@ interface FineractApi {
 
     @GetExchange("/paymenttypes")
     List<PaymentTypeResponse> getPaymentTypes();
+
+    // 1UBank transactions
+
+    @GetExchange("/oneubank/transactions")
+    TransactionsResponse listTransactions(@RequestParam("savingsId") long savingsId, @RequestParam("fromDate") String fromDate,
+            @RequestParam("toDate") String toDate, @RequestParam(name = "type", required = false) String type,
+            @RequestParam(name = "beforeId", required = false) Long beforeId, @RequestParam("limit") int limit);
+
+    @GetExchange("/oneubank/transactions")
+    TransactionsResponse getTransaction(@RequestParam("savingsId") long savingsId, @RequestParam("transactionId") long transactionId);
+
+    @GetExchange("/oneubank/transactions")
+    TransactionsResponse findTransactions(@RequestParam("transactionReference") String transactionReference);
 
     @GetExchange("/savingsproducts")
     List<SavingsProductResponse> getSavingsProducts();
